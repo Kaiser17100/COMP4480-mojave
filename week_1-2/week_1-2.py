@@ -29,7 +29,7 @@ def addMissions():
     )
     time.sleep(1)
     
-    # how many wp does or mission have and sending it
+    # how many wp does our mission have and sending it
     connection.mav.mission_count_send(
         connection.target_system, # plane id
         connection.target_component, # plane's brain
