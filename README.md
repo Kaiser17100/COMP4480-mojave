@@ -7,7 +7,7 @@ This is project for COMP 4480 class, in this class our objective is to create a 
 - Fuzzy Controller for Pitch, Yaw, Roll, Altitude and Speed values of the plane
 # Team Name: Mojave
 # Members: 
-- Kaiser17100
+- Kaiser17100 -> https://github.com/Kaiser17100
 - dilanisik -> https://github.com/dilanisik
 - Paratenya -> https://github.com/Paratenya
 - huseyinemrek93-sudo -> https://github.com/huseyinemrek93-sudo
