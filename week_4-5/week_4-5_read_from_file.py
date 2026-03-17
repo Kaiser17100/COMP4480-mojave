@@ -40,11 +40,6 @@ class PIDController:
         self._prev_error = 0.0
         self._prev_time  = time.time()
 
-    def reset(self):
-        self._integral   = 0.0
-        self._prev_error = 0.0
-        self._prev_time  = time.time()
-
     # external_rate is for ease of use for controller logic, fuzzy controller needs it, easier to code
     def compute(self, error: float, external_rate: float) -> float:
         now = time.time()
@@ -52,7 +47,7 @@ class PIDController:
         
         self._integral += error * dt
         # Kp * e + integral(e) + derivative(e)
-        out = (self.kp * error) + (self.ki * self._integral) + (self.kd * dt)
+        out = (self.kp * error) + (self.ki * self._integral) + (self.kd * external_rate)
         
         self._prev_error = error
         self._prev_time  = now
@@ -306,6 +301,7 @@ def input_thread(cmd: CommandState, ctrl_label: str):
             cmd.update('pitch', 0.0)
             cmd.update('roll', 0.0)
             cmd.update('yaw', None)
+            cmd.update('alt', None)
             print("[Input] Reset → Pitch=0° Roll=0° (Wings level, heading free)")
             continue
 
@@ -386,10 +382,10 @@ def make_controllers(mode: str) -> dict:
     if mode == 'pid':
         return {
             # MUST FINE TUNE THESE
-            'pitch': PIDController(kp=1.5, ki=0.02, kd=0.3),
-            'roll': PIDController(kp=0.8, ki=0.01, kd=0.3),
+            'pitch': PIDController(kp=0.9, ki=0.02, kd=0.35),
+            'roll': PIDController(kp=0.5, ki=0.01, kd=0.25),
             'yaw': PIDController(kp=2.0, ki=0.01, kd=0.1),
-            'alt': PIDController(kp=0.4, ki=0.01, kd=0.1),
+            'alt': PIDController(kp=1.2, ki=0.01, kd=0.1),
             'speed': PIDController(kp=0.05, ki=0.005, kd=0.01),
         }
     
@@ -398,8 +394,8 @@ def make_controllers(mode: str) -> dict:
         'pitch': FuzzyController(error_range=45.0, rate_range=60.0, out_range=12.0),
         'roll':  FuzzyController(error_range=45.0, rate_range=60.0, out_range=12.0),
         'yaw':   FuzzyController(error_range=180.0, rate_range=60.0, out_range=20.0),
-        'alt':   FuzzyController(error_range=50.0,  rate_range=10.0, out_range=8.0),
-        'speed': FuzzyController(error_range=20.0,  rate_range=5.0,  out_range=0.4),
+        'alt':   FuzzyController(error_range=50.0,  rate_range=10.0, out_range=25.0),
+        'speed': FuzzyController(error_range=20.0,  rate_range=40.0,  out_range=1.0),
     }
 
 
@@ -427,7 +423,7 @@ def run():
     inp.start()
 
     # to track measurements here instead of error states
-    prev_meas = {'yaw': None, 'pitch': None, 'roll': None, 'alt': None, 'speed': None}
+    prev_meas = {'yaw': None, 'pitch': None, 'roll': None, 'alt': None, 'speed': None, 'spd_rate_smooth': None}
     
     prev_time_att = time.time()
     prev_time_alt = time.time()
@@ -528,17 +524,29 @@ def run():
             if t_speed is not None:
                 if prev_meas['speed'] is None:
                     prev_meas['speed'] = airspeed
+                    prev_meas['spd_rate_smoothed'] = 0.0  # Initialize the filter
 
                 spd_delta = airspeed - prev_meas['speed']
-                spd_rate  = max(-5.0, min(5.0, spd_delta / dt))
                 prev_meas['speed'] = airspeed
+                
+                spd_err = t_speed - airspeed
+                
+                raw_rate = -spd_delta / dt
+                
+                smoothed_rate = (0.2 * raw_rate) + (0.8 * prev_meas.get('spd_rate_smoothed', 0.0))
+                prev_meas['spd_rate_smoothed'] = smoothed_rate
+                
+                err_rate = max(-10.0, min(10.0, smoothed_rate))
 
-                spd_err        = t_speed - airspeed
-                thrust_delta   = ctrls['speed'].compute(spd_err, spd_rate)
+                thrust_shift = ctrls['speed'].compute(spd_err, err_rate)
 
-                current_thrust = max(0.2, min(1.0, 0.6 + thrust_delta))
+                current_thrust += thrust_shift * dt
+                
+                current_thrust = max(0.2, min(1.0, current_thrust))
             else:
                 prev_meas['speed'] = None
+                if 'spd_rate_smoothed' in prev_meas:
+                    del prev_meas['spd_rate_smoothed']
 
         elif msg.get_type() == 'GLOBAL_POSITION_INT':
             now = time.time()
@@ -587,7 +595,7 @@ def run():
                     a_err  = t_alt - alt_m
 
                     alt_pitch = ctrls['alt'].compute(a_err, a_rate)
-                    alt_pitch = max(-15.0, min(15.0, alt_pitch))
+                    alt_pitch = max(-25.0, min(25.0, alt_pitch))
                     cmd.update('pitch', alt_pitch)
 
                 else:
