@@ -186,23 +186,6 @@ class CommandState:
 #  HELPERS
 # ─────────────────────────────────────────────
 
-def angle_to_pwm(angle: float, max_angle: float) -> int:
-    """
-    Maps an angle to a standard RC PWM range (1000 to 2000).
-    0 degrees always equals 1500 (center stick).
-    """
-    # Constrain the angle to the maximum limit
-    constrained_angle = max(-max_angle, min(max_angle, angle))
-    
-    # Map to 1000-2000 range
-    pwm = 1500 + (constrained_angle / max_angle) * 500
-    return int(pwm)
-
-def throttle_to_pwm(thrust_0_to_1: float) -> int:
-    """ Maps 0.0 - 1.0 thrust to 1000 - 2000 PWM """
-    constrained_thrust = max(0.0, min(1.0, thrust_0_to_1))
-    return int(1000 + (constrained_thrust * 1000))
-
 def init_missions():
     print("Adding missions...")
     
