@@ -1,19 +1,24 @@
 from pymavlink import mavutil
+from controllers import *
 import time
 import math
 import threading
+import cv2  # Added OpenCV for camera streaming
 
-AXIS_BOUNDS = {
-    'pitch': (-30.0,  30.0),
-    'roll':  (-45.0,  45.0),
-    'yaw':   (-180.0, 180.0),
-    'alt': (-300.0, 300.0),
-    'speed': (13, 30)
-}
+## GLOBAL VARIABLES ##
 
 TAKEOFF_ALT_TARGET = 50.0   
 TAKEOFF_ALT_THRESH =  5.0 
 
+bounds = {
+    'pitch': (-30.0,  30.0),
+    'roll':  (-45.0,  45.0),
+    'yaw':   (-180.0, 180.0),
+    'alt': ( 55.0, 300.0),
+    'speed': (13, 30)
+}
+
+## CODE START ##
 connection = mavutil.mavlink_connection('udp:127.0.0.1:14550')
 connection.wait_heartbeat()
 print("Connected to Fixed-Wing Vehicle...")
@@ -26,121 +31,7 @@ connection.mav.request_data_stream_send(
     1
 )
 
-# ─────────────────────────────────────────────
-#  CONTROLLERS
-# ─────────────────────────────────────────────
-
-# PID
-class PIDController:
-    def __init__(self, kp=12.0, ki=0.5, kd=0.6):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self._integral   = 0.0
-        self._prev_error = 0.0
-        self._prev_time  = time.time()
-
-    def compute(self, error: float, external_rate: float) -> float:
-        now = time.time()
-        dt  = max(now - self._prev_time, 0.01)
-        
-        self._integral += error * dt
-        out = (self.kp * error) + (self.ki * self._integral) + (self.kd * external_rate)
-        
-        self._prev_error = error
-        self._prev_time  = now
-        return out
-
-
-# FUZZY
-class FuzzyController:
-    RESOLUTION = 200
-    def __init__(self, error_range=180.0, rate_range=90.0, out_range=30.0):
-        self.er  = error_range
-        self.rr  = rate_range
-        self.out = out_range
-        
-        self._out_universe = [
-            i * (2 * out_range / (self.RESOLUTION - 1)) - out_range
-            for i in range(self.RESOLUTION)
-        ]
-        
-        self._rules = [
-            ['NL', 'NL', 'NL', 'NL', 'NM', 'NS', 'ZE'],
-            ['NL', 'NL', 'NL', 'NM', 'NS', 'ZE', 'PS'],
-            ['NL', 'NL', 'NM', 'NS', 'ZE', 'PS', 'PM'],
-            ['NL', 'NM', 'NS', 'ZE', 'PS', 'PM', 'PL'],
-            ['NM', 'NS', 'ZE', 'PS', 'PM', 'PL', 'PL'],
-            ['NS', 'ZE', 'PS', 'PM', 'PL', 'PL', 'PL'],
-            ['ZE', 'PS', 'PM', 'PL', 'PL', 'PL', 'PL'],
-        ]
-        
-        self._labels = ['NL', 'NM', 'NS', 'ZE', 'PS', 'PM', 'PL']
-
-    @staticmethod
-    def _tri(x, a, b, c):
-        if x <= a or x >= c:
-            return 0.0
-        return (x - a) / (b - a) if x <= b else (c - x) / (c - b)
-
-    def _fuzzify(self, value, universe_half):
-        u = universe_half
-        centres = [-u, -2*u/3, -u/3, 0, u/3, 2*u/3, u]
-        step = u / 3
-        
-        memberships = {
-            label: self._tri(value, c - step, c, c + step)
-            for label, c in zip(self._labels, centres)
-        }
-
-        memberships['NL'] = max(memberships['NL'], 1.0 if value <= -u else 0.0)
-        memberships['PL'] = max(memberships['PL'], 1.0 if value >=  u else 0.0)
-
-        return memberships
-
-    def _defuzzify(self, activation):
-        u    = self.out
-        step = u / 3
-        centres = [-u, -2*u/3, -u/3, 0, u/3, 2*u/3, u]
-        num = den = 0.0
-        
-        for x in self._out_universe:
-            mu = 0.0
-            for label, c in zip(self._labels, centres):
-                mu = max(mu, min(activation[label], self._tri(x, c - step, c, c + step)))
-            num += x * mu
-            den += mu
-        
-        if den == 0:
-            return 0.0
-        return num / den
-
-    def _infer(self, err_mu, rate_mu):
-        out = {label: 0.0 for label in self._labels}
-        
-        for i, e in enumerate(self._labels):
-            for j, r in enumerate(self._labels):
-                strength  = min(err_mu[e], rate_mu[r])
-                out_label = self._rules[i][j]
-                out[out_label] = max(out[out_label], strength)
-        
-        return out
-
-    def compute(self, error: float, error_rate: float) -> float:
-        error      = max(-self.er, min(self.er, error))
-        error_rate = max(-self.rr, min(self.rr, error_rate))
-        
-        return self._defuzzify(
-            self._infer(
-                self._fuzzify(error,      self.er),
-                self._fuzzify(error_rate, self.rr)
-            )
-        )
-
-
-# ─────────────────────────────────────────────
-#  SHARED COMMAND STATE
-# ─────────────────────────────────────────────
+## SHARED COMMAND STATE ##
 
 class CommandState:
     def __init__(self):
@@ -169,19 +60,10 @@ class CommandState:
         with self._lock:
             self.running = False
 
+## HELPERS ##
 
-# ─────────────────────────────────────────────
-#  HELPERS
-# ─────────────────────────────────────────────
-
-def angle_to_pwm(angle: float, max_angle: float) -> int:
-    constrained_angle = max(-max_angle, min(max_angle, angle))
-    pwm = 1500 + (constrained_angle / max_angle) * 500
-    return int(pwm)
-
-def throttle_to_pwm(thrust_0_to_1: float) -> int:
-    constrained_thrust = max(0.0, min(1.0, thrust_0_to_1))
-    return int(1000 + (constrained_thrust * 1000))
+def angle_to_pwm(val: float) -> int:
+    return int(max(1000, min(2000, 1500 + val)))
 
 def init_missions():
     print("Adding missions...")
@@ -288,8 +170,8 @@ def input_thread(cmd: CommandState, ctrl_label: str):
             continue
 
         axis, val_str = parts
-        if axis not in AXIS_BOUNDS:
-            print(f"[Input] Unknown axis '{axis}'. Choose from: {list(AXIS_BOUNDS)}")
+        if axis not in bounds:
+            print(f"[Input] Unknown axis '{axis}'. Choose from: {list(bounds)}")
             continue
 
         try:
@@ -297,7 +179,7 @@ def input_thread(cmd: CommandState, ctrl_label: str):
         except ValueError:
             continue
 
-        lo, hi = AXIS_BOUNDS[axis]
+        lo, hi = bounds[axis]
         if not (lo <= value <= hi):
             print(f"[Input] {axis} must be in [{lo}, {hi}].")
             continue
@@ -323,6 +205,38 @@ def input_thread(cmd: CommandState, ctrl_label: str):
 
         print(f"[Input] Target {axis} → {value:+.1f}°")
 
+# --- NEW CAMERA THREAD ---
+def camera_thread(cmd: CommandState, video_source):
+    """
+    Reads frames from the camera and displays them.
+    Change video_source to your stream URL (e.g., 'udp://127.0.0.1:5600') if using network video.
+    """
+    print(f"[Camera] Attempting to connect to source: {video_source}")
+    cap = cv2.VideoCapture(video_source)
+    
+    if not cap.isOpened():
+        print("[Camera] Warning: Could not open video source.")
+        return
+
+    print("[Camera] Stream active.")
+    while cmd.running:
+        ret, frame = cap.read()
+        if not ret:
+            # If frame drops, just continue. We don't want to crash the thread.
+            continue
+            
+        cv2.imshow("Drone Camera Feed", frame)
+        
+        # Press 'q' on the video window to stop the whole program safely
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("[Camera] 'q' pressed. Shutting down...")
+            cmd.stop()
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    print("[Camera] Stream closed.")
+
 def wait_for_takeoff():
     print(f"[Takeoff] Waiting for plane to climb ≥ {TAKEOFF_ALT_TARGET - TAKEOFF_ALT_THRESH:.0f} m ...")
     last_print = 0.0
@@ -342,22 +256,21 @@ def wait_for_takeoff():
             print(f"[Takeoff] Target altitude reached. Switching to GUIDED ...")
             break
 
-def make_controllers(mode: str) -> dict:
+def make_controllers() -> dict:
     return {
-        # MUST FINE TUNE THESE
         'pitch': PIDController(kp=2.0, ki=0.02, kd=0.35),
         'roll': PIDController(kp=0.5, ki=0.01, kd=0.25),
         'yaw': PIDController(kp=2.0, ki=0.01, kd=0.1),
-       'alt':   FuzzyController(error_range=50.0,  rate_range=10.0, out_range=25.0),
+        'alt':   FuzzyController(error_range=50.0,  rate_range=10.0, out_range=25.0),
         'speed': FuzzyController(error_range=20.0,  rate_range=40.0,  out_range=1.0),
     }
-# ─────────────────────────────────────────────
-#  Takeoff monitor
-# ─────────────────────────────────────────────
+
+
+## MAIN STUFF ##
 
 def run():
-    mode = "flying"
-    ctrls = make_controllers(mode)
+    temp = "temp"
+    ctrls = make_controllers()
 
     wait_for_takeoff()
 
@@ -370,24 +283,38 @@ def run():
     cmd = CommandState()
     cmd.target_yaw = cruise_yaw_deg
 
-    inp = threading.Thread(target=input_thread, args=(cmd, mode), daemon=True)
+    # Start the input thread
+    inp = threading.Thread(target=input_thread, args=(cmd, temp), daemon=True)
     inp.start()
 
-    prev_meas = {'yaw': None, 'pitch': None, 'roll': None, 'alt': None, 'speed': None, 'spd_rate_smooth': None}
-    
-    prev_time_att = time.time()
-    prev_time_alt = time.time()
-    prev_time_spd = time.time()
-    
-    current_thrust = 0.8
+# --- START THE CAMERA THREAD ---
+    # Listening to the Gazebo UDP video stream
+    gazebo_stream = 'udp://127.0.0.1:5600'
+    cam = threading.Thread(target=camera_thread, args=(cmd, gazebo_stream), daemon=True)
+    cam.start()
 
-    print(f"\n[{mode}] Fixed-Wing GUIDED cruise loop active at 20 Hz.")
-    print(f"[{mode}] Altitude is controlled by pitch (Hard deck: 15m)")
-    print(f"[{mode}] Telemetry printing is disabled to allow console input.\n")
+    prev_meas = {
+        'yaw': None, 'pitch': None, 'roll': None, 
+        'alt': None, 'alt_rate_smoothed':None, 
+        'speed': None, 'spd_rate_smooth': None, 
+        'time': time.time()
+    }
+    
+    roll_pwm = pitch_pwm = yaw_pwm = 1500
+    throttle_pwm = 1800
+    current_thrust = 0.8
+    
+    print(f"\n| Fixed-Wing GUIDED cruise loop active at 20 Hz.")
+    print(f"| Altitude is controlled by pitch (Hard deck: 15m)")
+    print(f"| Telemetry printing is disabled to allow console input.\n")
 
     while True:
         t_pitch, t_roll, t_yaw, t_alt, t_speed, running, override = cmd.snapshot()
-        
+
+        now = time.time()
+        dt  = max(now - prev_meas['time'], 0.01)
+        prev_meas['time'] = now
+
         if not running: 
             break
 
@@ -397,20 +324,11 @@ def run():
             continue
 
         if msg.get_type() == 'ATTITUDE':
-            now = time.time()
-            dt  = max(now - prev_time_att, 0.01)
-            prev_time_att = now
-            
             current_pitch = math.degrees(msg.pitch)
             current_roll = math.degrees(msg.roll)
             current_yaw = math.degrees(msg.yaw)
 
-            # Initialize base PWM outputs to center position
-            roll_pwm = 1500
-            pitch_pwm = 1500
-            yaw_pwm = 1500
-
-            # pitch calc (PID outputs PWM offset)
+            # pitch calc
             if t_pitch is not None:
                 if prev_meas['pitch'] is None:
                     prev_meas['pitch'] = current_pitch
@@ -420,10 +338,9 @@ def run():
                 prev_meas['pitch'] = current_pitch
                 p_err = t_pitch - current_pitch
 
-                # Standard RC: Pitch down (neg error) generates higher PWM, Pitch up (pos error) generates lower PWM
-                pitch_pwm = int(max(1000, min(2000, 1500 - ctrls['pitch'].compute(p_err, p_rate))))
+                pitch_pwm = angle_to_pwm(-ctrls['pitch'].compute(p_err, p_rate))
 
-            # roll calc (PID outputs PWM offset)
+            # roll calc
             if t_roll is not None:
                 if prev_meas['roll'] is None:
                     prev_meas['roll'] = current_roll
@@ -433,9 +350,9 @@ def run():
                 prev_meas['roll'] = current_roll
                 r_err = t_roll - current_roll
 
-                roll_pwm = int(max(1000, min(2000, 1500 + ctrls['roll'].compute(r_err, r_rate))))
+                roll_pwm = angle_to_pwm(ctrls['roll'].compute(r_err, r_rate))
 
-            # yaw calc (PID outputs PWM offset)
+            # yaw calc
             if t_yaw is not None:
                 if prev_meas['yaw'] is None:
                     prev_meas['yaw'] = current_yaw
@@ -445,29 +362,10 @@ def run():
                 y_rate = max(-60.0, min(60.0, -yaw_delta / dt))
                 y_err = (t_yaw - current_yaw + 180) % 360 - 180
 
-                yaw_pwm = int(max(1000, min(2000, 1500 + ctrls['yaw'].compute(y_err, y_rate))))
+                yaw_pwm = angle_to_pwm(ctrls['yaw'].compute(y_err, y_rate))
 
-            # throttle calc
-            throttle_pwm = throttle_to_pwm(current_thrust)
-
-            # RC Override Command
-            # Ch1: Roll, Ch2: Pitch, Ch3: Throttle, Ch4: Yaw
-            # Sending 65535 tells Ardupilot "do not override this channel, return control to AP"
-            connection.mav.rc_channels_override_send(
-                connection.target_system,
-                connection.target_component,
-                roll_pwm if t_roll is not None else 65535,
-                pitch_pwm if t_pitch is not None else 65535,
-                throttle_pwm,
-                yaw_pwm if t_yaw is not None else 65535,
-                65535, 65535, 65535, 65535
-            )
 
         elif msg.get_type() == 'VFR_HUD':
-            now = time.time()
-            dt  = max(now - prev_time_spd, 0.01)
-            prev_time_spd = now
-
             airspeed = msg.airspeed
 
             if t_speed is not None:
@@ -488,16 +386,13 @@ def run():
                 thrust_shift = ctrls['speed'].compute(spd_err, err_rate)
                 current_thrust += thrust_shift * dt
                 current_thrust = max(0.2, min(1.0, current_thrust))
+
             else:
                 prev_meas['speed'] = None
                 if 'spd_rate_smoothed' in prev_meas:
                     del prev_meas['spd_rate_smoothed']
 
         elif msg.get_type() == 'GLOBAL_POSITION_INT':
-            now = time.time()
-            dt  = max(now - prev_time_alt, 0.01)
-            prev_time_alt = now
-
             alt_m = msg.relative_alt / 1000.0        
             
             if prev_meas['alt'] is None:
@@ -533,6 +428,7 @@ def run():
                     cmd.update('roll', 0.0) 
                     cmd.update('yaw', None)
                     cmd.set_override(False)
+            
             else:
                 if t_alt is not None:
                     a_err  = t_alt - alt_m
@@ -542,15 +438,26 @@ def run():
                     alt_pitch = ctrls['alt'].compute(a_err, a_rate)
                     alt_pitch = max(-25.0, min(25.0, alt_pitch))
                     cmd.update('pitch', alt_pitch)
+                
                 else:
                     if t_speed is None:
                         current_thrust = 0.6
+
+        connection.mav.rc_channels_override_send(
+            connection.target_system,
+            connection.target_component,
+            roll_pwm if t_roll is not None else 65535,   # Roll
+            pitch_pwm if t_pitch is not None else 65535, # Pitch
+            throttle_pwm,                                # Throttle
+            yaw_pwm if t_yaw is not None else 65535,     # Yaw
+            65535, 65535, 65535, 65535                   # rest is blank
+        )
 
         time.sleep(0.05)   # 20 Hz
 
     print("\nControl loop stopped.")
 
-if __name__ == '__main__':
-    init_missions()
-    auto_and_arm()
-    run()
+# You'll need to install OpenCV if you haven't already: pip install opencv-python
+init_missions()
+auto_and_arm()
+run()
