@@ -3,7 +3,6 @@ from controllers import *
 import time
 import math
 import threading
-import cv2  # Added OpenCV for camera streaming
 
 ## GLOBAL VARIABLES ##
 
@@ -205,38 +204,6 @@ def input_thread(cmd: CommandState, ctrl_label: str):
 
         print(f"[Input] Target {axis} → {value:+.1f}°")
 
-# --- NEW CAMERA THREAD ---
-def camera_thread(cmd: CommandState, video_source):
-    """
-    Reads frames from the camera and displays them.
-    Change video_source to your stream URL (e.g., 'udp://127.0.0.1:5600') if using network video.
-    """
-    print(f"[Camera] Attempting to connect to source: {video_source}")
-    cap = cv2.VideoCapture(video_source)
-    
-    if not cap.isOpened():
-        print("[Camera] Warning: Could not open video source.")
-        return
-
-    print("[Camera] Stream active.")
-    while cmd.running:
-        ret, frame = cap.read()
-        if not ret:
-            # If frame drops, just continue. We don't want to crash the thread.
-            continue
-            
-        cv2.imshow("Drone Camera Feed", frame)
-        
-        # Press 'q' on the video window to stop the whole program safely
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            print("[Camera] 'q' pressed. Shutting down...")
-            cmd.stop()
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-    print("[Camera] Stream closed.")
-
 def wait_for_takeoff():
     print(f"[Takeoff] Waiting for plane to climb ≥ {TAKEOFF_ALT_TARGET - TAKEOFF_ALT_THRESH:.0f} m ...")
     last_print = 0.0
@@ -286,12 +253,6 @@ def run():
     # Start the input thread
     inp = threading.Thread(target=input_thread, args=(cmd, temp), daemon=True)
     inp.start()
-
-# --- START THE CAMERA THREAD ---
-    # Listening to the Gazebo UDP video stream
-    gazebo_stream = 'udp://127.0.0.1:5600'
-    cam = threading.Thread(target=camera_thread, args=(cmd, gazebo_stream), daemon=True)
-    cam.start()
 
     prev_meas = {
         'yaw': None, 'pitch': None, 'roll': None, 
