@@ -1,3 +1,5 @@
+## USE THIS INSTEAD OF GUIDED ONE ##
+
 from pymavlink import mavutil
 import time
 import math
