@@ -52,7 +52,6 @@ class CommandState:
         with self._lock:
             self.running = False
 
-
 # Camera Stream #
 # no clue you guys added this
 class CameraStream:
@@ -314,8 +313,8 @@ def make_controllers() -> dict:
         'alt':   FuzzyController(error_range=50.0,  rate_range=10.0, out_range=25.0),
         'speed': FuzzyController(error_range=20.0,  rate_range=40.0,  out_range=1.0),
 
-        'x': PIDController(kp=0.1, ki=0.0, kd=0.0),
-        'y': PIDController(kp=0.1, ki=0.0, kd=0.0),
+        'x': PIDController(kp=0.08, ki=0.01, kd=0.003),
+        'y': PIDController(kp=0.08, ki=0.01, kd=0.003),
     }
 
 
@@ -417,7 +416,7 @@ def run():
                     prev_meas['x'] = curr_x * 10
                 
                 if prev_meas['y'] is None:
-                    prev_meas['y'] = curr_y
+                    prev_meas['y'] = curr_y * 10
                 
                 dx = curr_x - prev_meas['x']
                 dy = curr_y - prev_meas['y']
@@ -429,13 +428,19 @@ def run():
                 new_x = ctrls['x'].compute(x_error, x_rate)
                 new_y = ctrls['y'].compute(y_error, y_rate)
 
-                new_roll = new_x * 15
-                new_pitch = new_y * 15
+                new_roll = max(min(math.degrees(math.atan(new_x/new_y)), -15), 15)
+                if x_error < 0.0:
+                    new_roll = -new_roll
 
-                print(f"\nCurrent X: {curr_x} Target X: {x_norm} | Current Y: {curr_y} Target Y: {y_norm} | Counter: {counter} | New Roll: {new_roll}, New Pitch: {new_pitch}")
+                new_pitch = max(min(math.degrees(math.atan(new_y/new_x)), -15), 15)
+                if y_error < 0.0:
+                    new_pitch = -new_pitch
 
-                curr_x += new_x / dt
-                curr_y += new_y / dt
+
+                print(f"\nCurrent X: {curr_x} Target X: {x_norm} | Current Y: {curr_y} Target Y: {y_norm} | Counter: {counter} | New Roll: {math.degrees(new_roll) / 100 * dt}, New Pitch: {math.degrees(new_pitch) / 100 * dt}")
+
+                curr_x += math.degrees(new_roll) / 100 * dt
+                curr_y += math.degrees(new_pitch) / 100 * dt
                 
                 cmd.update('pitch', new_pitch)
                 cmd.update('roll', new_roll)
@@ -443,12 +448,12 @@ def run():
                 cmd.update('alt', None)
                 cmd.update('speed', None)
                 
-
                 counter = counter + dt
-                if abs(x_error) > 0.001 and abs(y_error) > 0.001:
+                if abs(x_error) > 0.0001 and abs(y_error) > 0.0001:
                     counter = 0.0
                 elif counter >= 4.0:
                     counter = 0.0
+                    print("\nLocked IN")
                     cmd.update('click_point', None)
                     curr_x = curr_y = 0.0
 
