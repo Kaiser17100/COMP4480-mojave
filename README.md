@@ -5,6 +5,8 @@ This is project for COMP 4480 class, in this class our objective is to create a 
 - Manual Mission Adding
 - PID Controller for Pitch, Yaw, Roll, Altitude and Speed values of the plane
 - Fuzzy Controller for Pitch, Yaw, Roll, Altitude and Speed values of the plane
+- Camera connection via OpenCV
+- Ability to click to a position on the camera feed and locking on the that direction
 ## Team Name: Mojave
 - Kaiser17100 -> https://github.com/Kaiser17100
 - dilanisik -> https://github.com/dilanisik
