@@ -1,5 +1,5 @@
-## TO DO 
-# tıkayınca hareket ediyor ama bunun yavaşlamsı lazım
+## NOTES
+# throttle_pwm'de sıkıntı var çözülmesi lazım
 
 from pymavlink import mavutil
 from controllers import *
@@ -9,34 +9,10 @@ import math
 import threading
 import os
 
-## GLOBAL VARIABLES ##
+## CLASSES ##
 
-TAKEOFF_ALT_TARGET = 50.0   
-TAKEOFF_ALT_THRESH =  5.0 
-
-bounds = {
-    'pitch': (-30.0,  30.0),
-    'roll':  (-45.0,  45.0),
-    'yaw':   (-180.0, 180.0),
-    'alt': ( 55.0, 300.0),
-    'speed': (13, 30)
-}
-
-## CODE START ##
-connection = mavutil.mavlink_connection('udp:127.0.0.1:14550')
-connection.wait_heartbeat()
-print("Connected to Fixed-Wing Vehicle...")
-
-connection.mav.request_data_stream_send(
-    connection.target_system,
-    connection.target_component,
-    mavutil.mavlink.MAV_DATA_STREAM_ALL,
-    20,
-    1
-)
-
-## SHARED COMMAND STATE ##
-
+# Command State #
+# used for general logic and for threading eyyyy operation systems
 class CommandState:
     def __init__(self):
         self._lock = threading.Lock()
@@ -51,7 +27,10 @@ class CommandState:
 
     def update(self, axis: str, value):
         with self._lock:
-            setattr(self, f'target_{axis}', value)
+            if axis == 'click_point':
+                self.click_point = None
+            else:
+                setattr(self, f'target_{axis}', value)
 
     def set_override(self, state: bool):
         with self._lock:
@@ -63,7 +42,6 @@ class CommandState:
     def consume_click(self):
         with self._lock:
             cp = self.click_point
-            self.click_point = None
             return cp
 
     def snapshot(self):
@@ -74,19 +52,9 @@ class CommandState:
         with self._lock:
             self.running = False
 
-## HELPERS ##
 
-def angle_to_pwm(val: float) -> int:
-    return int(max(1000, min(2000, 1500 + val)))
-
-def enable_gazebo_camera():
-    print("[Camera] Sending enable signal to Gazebo...")
-    
-    topic = '/world/runway/model/uav_1/link/base_link/sensor/nose_camera/image/enable_streaming'
-    
-    os.system(f'gz topic -t {topic} -m gz.msgs.Boolean -p "data: 1"')
-    time.sleep(1)
-
+# Camera Stream #
+# no clue you guys added this
 class CameraStream:
     def __init__(self):
         self.frame = None
@@ -122,9 +90,55 @@ class CameraStream:
         if hasattr(self, 'cap'):
             self.cap.release()
 
+
+
+## GLOBAL VARIABLES ##
+
+TAKEOFF_ALT_TARGET = 50.0   
+TAKEOFF_ALT_THRESH =  5.0 
+
+bounds = {
+    'pitch': (-30.0,  30.0),
+    'roll':  (-45.0,  45.0),
+    'yaw':   (-180.0, 180.0),
+    'alt': ( 55.0, 300.0),
+    'speed': (13, 30)
+}
+
+## CODE START ##
+
+# connection #
+connection = mavutil.mavlink_connection('udp:127.0.0.1:14550')
+connection.wait_heartbeat()
+print("Connected to Fixed-Wing Vehicle...")
+
+connection.mav.request_data_stream_send(
+    connection.target_system,
+    connection.target_component,
+    mavutil.mavlink.MAV_DATA_STREAM_ALL,
+    20,
+    1
+)
+
+## HELPERS ##
+
+# to convert the given angle to pwm for override
+def angle_to_pwm(val: float) -> int:
+    return int(max(1000, min(2000, 1500 + val)))
+
+# to not open a new terminal to write this bs
+def enable_gazebo_camera():
+    print("[Camera] Sending enable signal to Gazebo...")
+    
+    topic = '/world/runway/model/uav_1/link/base_link/sensor/nose_camera/image/enable_streaming'
+    
+    os.system(f'gz topic -t {topic} -m gz.msgs.Boolean -p "data: 1"')
+    time.sleep(1)
+
 def init_missions():
     print("Adding missions...")
     
+    # clear prev missions
     connection.mav.mission_clear_all_send(
         connection.target_system,
         connection.target_component
@@ -143,20 +157,26 @@ def init_missions():
     for m in mission_list:
         connection.mav.mission_item_send(
             connection.target_system, connection.target_component,
-            m['seq'], m['frame'], m['command'], m['current'], m['autocontinue'],
+            m['seq'], 
+            m['frame'], 
+            m['command'],
+            m['current'], 
+            m['autocontinue'],
             m['param1'], m['param2'], m['param3'], m['param4'],
             m['lat'], m['lon'], m['alt']
         )
     
+    # to make sure plane recieved our mission send
     while True:
         ack = connection.recv_match(type='MISSION_ACK', blocking=True)
         if ack:
             print("Mission accepted." if ack.type == 0 else "Mission failed.")
         break
 
-def read_missions():
+# read from mission file / default param is test.waypoints 
+def read_missions(path = "test.waypoints"):
     missions = []
-    with open("test.waypoints", 'r') as file:
+    with open(path, 'r') as file:
         for line in file:
             line = line.strip()
             if not line or line.startswith('QGC'):
@@ -191,8 +211,8 @@ def auto_and_arm():
     )
     print("Arming...")
 
-def input_thread(cmd: CommandState, ctrl_label: str):
-    print(f"\n[Input] Controller : {ctrl_label}")
+# thread to take input while flying
+def input_thread(cmd: CommandState):
     print("[Input] Commands   : pitch <deg>  roll <deg>  yaw <deg>  alt <val>  speed <val>  reset  quit")
     print("[Input] Note       : Typing 'roll' disables auto-heading. Typing 'yaw' disables manual roll.\n")
 
@@ -218,7 +238,9 @@ def input_thread(cmd: CommandState, ctrl_label: str):
             cmd.update('roll', 0.0)
             cmd.update('yaw', None)
             cmd.update('alt', None)
-            print("[Input] Reset → Pitch=0° Roll=0° (Wings level, heading free)")
+            cmd.update('speed', None)
+            cmd.update('click_point', None)
+            print("[Input] Reset -> Pitch=0 Roll=0 (Wings level, heading free)")
             continue
 
         parts = raw.split()
@@ -241,29 +263,30 @@ def input_thread(cmd: CommandState, ctrl_label: str):
             print(f"[Input] {axis} must be in [{lo}, {hi}].")
             continue
 
-        if axis == 'roll':
-            cmd.update('roll', value)
-            cmd.update('yaw', None)  
-        
-        elif axis == 'yaw':
-            cmd.update('yaw', value)
-            cmd.update('roll', None)
-        
-        elif axis == 'alt':
-            cmd.update('pitch', None)
-            cmd.update('alt', value)
-        
-        elif axis == 'pitch':
-            cmd.update('alt', None)
-            cmd.update('pitch', value)
-        
-        else:
-            cmd.update(axis, value)
+        match axis:
+            case 'roll':
+                cmd.update('roll', value)
+                cmd.update('yaw', None)    
+           
+            case 'yaw':
+                cmd.update('yaw', value)
+                cmd.update('roll', None)        
+            
+            case 'alt':
+                cmd.update('pitch', None)
+                cmd.update('alt', value)
+            
+            case 'pitch':
+                cmd.update('alt', None)
+                cmd.update('pitch', value)
+                
+            case _:
+                cmd.update(axis, value)
 
-        print(f"[Input] Target {axis} → {value:+.1f}°")
+        print(f"[Input] Target {axis} {value:+.1f}°")
 
 def wait_for_takeoff():
-    print(f"[Takeoff] Waiting for plane to climb ≥ {TAKEOFF_ALT_TARGET - TAKEOFF_ALT_THRESH:.0f} m ...")
+    print(f"[Takeoff] Waiting for plane to climb >= {TAKEOFF_ALT_TARGET - TAKEOFF_ALT_THRESH:.0f} m ...")
     last_print = 0.0
     while True:
         msg = connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1.0)
@@ -274,7 +297,7 @@ def wait_for_takeoff():
         alt_m = msg.relative_alt / 1000.0
         now   = time.time()
         if now - last_print >= 2.0:
-            print(f"[Takeoff]   alt = {alt_m:.1f} m  (target {TAKEOFF_ALT_TARGET:.0f} m)")
+            print(f"[Takeoff] alt = {alt_m:.1f} m  (target {TAKEOFF_ALT_TARGET:.0f} m)")
             last_print = now
         
         if alt_m >= TAKEOFF_ALT_TARGET - TAKEOFF_ALT_THRESH:
@@ -283,12 +306,16 @@ def wait_for_takeoff():
 
 def make_controllers() -> dict:
     return {
-        # MUST FINE TUNE THESE
-        'pitch': PIDController(kp=23.0, ki=0.55, kd=0.3),
+        # Fine tune yaw, x and y controllers
+        'pitch': PIDController(kp=23.1, ki=0.56, kd=0.33),
         'roll': PIDController(kp=20.0, ki=0.5, kd=0.3),
         'yaw': PIDController(kp=2.0, ki=0.01, kd=0.1),
-       'alt':   FuzzyController(error_range=50.0,  rate_range=10.0, out_range=25.0),
+        
+        'alt':   FuzzyController(error_range=50.0,  rate_range=10.0, out_range=25.0),
         'speed': FuzzyController(error_range=20.0,  rate_range=40.0,  out_range=1.0),
+
+        'x': PIDController(kp=0.1, ki=0.0, kd=0.0),
+        'y': PIDController(kp=0.1, ki=0.0, kd=0.0),
     }
 
 
@@ -303,29 +330,33 @@ def run():
     cam = CameraStream()
     cam.start()
 
+    cmd = CommandState()
+
+    inp_t = threading.Thread(target=input_thread, args=(cmd,), daemon=True)
+    inp_t.start()
+
+    # to make sure plane doesn't act weird
     att_msg = connection.recv_match(type='ATTITUDE', blocking=True, timeout=2.0)
     cruise_yaw_deg = math.degrees(att_msg.yaw) if att_msg else 0.0
     
+    cmd.target_yaw = cruise_yaw_deg
+
     connection.set_mode('FBWA')
     time.sleep(0.5)
 
-    cmd = CommandState()
-    cmd.target_yaw = cruise_yaw_deg
+    curr_x = curr_y = 0.0
 
-    t_input = threading.Thread(target=input_thread, args=(cmd, "Flying"), daemon=True)
-    t_input.start()
-
-# OpenCV Window and Mouse Callback
     cv2.namedWindow("Talon Nose Camera")
     def mouse_callback(event, x, y, flags, param):
+        nonlocal curr_x, curr_y
         if event == cv2.EVENT_LBUTTONDOWN:
             frame = cam.get_frame()
             if frame is not None:
                 h, w = frame.shape[:2]
                 cx, cy = w / 2.0, h / 2.0
-                # Normalize values from -1.0 to 1.0 based on center (positive y is up)
                 x_norm = (x - cx) / cx
                 y_norm = (cy - y) / cy
+                curr_x = curr_y = 0
                 cmd.set_click(x_norm, y_norm)
 
     cv2.setMouseCallback("Talon Nose Camera", mouse_callback)
@@ -334,24 +365,29 @@ def run():
         'yaw': None, 'pitch': None, 'roll': None, 
         'alt': None, 'alt_rate_smoothed':None, 
         'speed': None, 'spd_rate_smooth': None, 
-        'time': time.time()
+        'time': time.time(),
+        'x': None, 'y': None
     }
     
     roll_pwm = pitch_pwm = yaw_pwm = 1500
     throttle_pwm = 1800
     current_thrust = 0.8
-    delta_pitch = delta_roll = 0
     
-    print(f"\n| Fixed-Wing GUIDED cruise loop active at 20 Hz.")
-    print(f"| Altitude is controlled by pitch (Hard deck: 15m)")
-    print(f"| Telemetry printing is disabled to allow console input.\n")
+    counter = 0.0
 
     while True:
         t_pitch, t_roll, t_yaw, t_alt, t_speed, running, override = cmd.snapshot()
 
         frame = cam.get_frame()
         if frame is not None:
-            # We can later add OpenCV drawing functions here!
+            #crosshair
+            h, w = frame.shape[:2]
+            cx, cy = w // 2, h // 2
+            color = (0, 0, 255)
+            thickness = 1
+            cv2.line(frame, (cx - 20, cy), (cx + 20, cy), color, thickness)
+            cv2.line(frame, (cx, cy - 20), (cx, cy + 20), color, thickness)
+
             cv2.imshow("Talon Nose Camera", frame)
             cv2.waitKey(1)
 
@@ -366,83 +402,114 @@ def run():
         
         if msg is None: 
             continue
-        
-        click_data = cmd.consume_click()
-        if click_data and not override:
-            x_norm, y_norm = click_data
-            delta_roll = x_norm * 30.0
-            new_roll = max(-30.0, min(30.0, current_roll + delta_roll))
-            delta_pitch = y_norm * 25
-            new_pitch = max(-30.0, min(30.0, current_pitch + delta_pitch))
-            
-            # Clear old targets so pitch/yaw take precedence
-            cmd.update('roll', new_roll)
-            cmd.update('yaw', None)
-            cmd.update('alt', None)
-            cmd.update('pitch', new_pitch)
-            print(f"\n[Camera] Clicked! Turning Nose to Roll: {new_roll:.1f}°, Pitch: {new_pitch:.1f}°\ncmd> ", end="")
 
         if msg.get_type() == 'ATTITUDE':
             current_pitch = math.degrees(msg.pitch)
             current_roll = math.degrees(msg.roll)
             current_yaw = math.degrees(msg.yaw)
 
+            click_data = cmd.consume_click()
+            if click_data and not override:
+                x_norm, y_norm = click_data
+                x_norm *= 10
+                y_norm *= 10
+                if prev_meas['x'] is None:
+                    prev_meas['x'] = curr_x * 10
+                
+                if prev_meas['y'] is None:
+                    prev_meas['y'] = curr_y
+                
+                dx = curr_x - prev_meas['x']
+                dy = curr_y - prev_meas['y']
+                x_error = x_norm - curr_x
+                y_error = y_norm - curr_y
+                x_rate = max(-15, min(15.0, dx/dt))
+                y_rate = max(-15, min(15.0, dy/dt))
+
+                new_x = ctrls['x'].compute(x_error, x_rate)
+                new_y = ctrls['y'].compute(y_error, y_rate)
+
+                new_roll = new_x * 15
+                new_pitch = new_y * 15
+
+                print(f"\nCurrent X: {curr_x} Target X: {x_norm} | Current Y: {curr_y} Target Y: {y_norm} | Counter: {counter} | New Roll: {new_roll}, New Pitch: {new_pitch}")
+
+                curr_x += new_x / dt
+                curr_y += new_y / dt
+                
+                cmd.update('pitch', new_pitch)
+                cmd.update('roll', new_roll)
+                cmd.update('yaw', None)
+                cmd.update('alt', None)
+                cmd.update('speed', None)
+                
+
+                counter = counter + dt
+                if abs(x_error) > 0.001 and abs(y_error) > 0.001:
+                    counter = 0.0
+                elif counter >= 4.0:
+                    counter = 0.0
+                    cmd.update('click_point', None)
+                    curr_x = curr_y = 0.0
+
             # pitch calc
             if t_pitch is not None:
                 if prev_meas['pitch'] is None:
                     prev_meas['pitch'] = current_pitch
                 
-                p_delta = current_pitch - prev_meas['pitch']
-                p_rate  = max(-60.0, min(60.0, p_delta / dt))
+                dp = current_pitch - prev_meas['pitch']
+                p_error = t_pitch - current_pitch
+                p_rate  = max(-60.0, min(60.0, dp / dt))
+
                 prev_meas['pitch'] = current_pitch
-                p_err = t_pitch - current_pitch
-                print(current_pitch + ctrls['pitch'].compute(p_err, p_rate))
-                pitch_pwm = angle_to_pwm(current_pitch + ctrls['pitch'].compute(p_err, p_rate))
+
+                pitch_pwm = angle_to_pwm(current_pitch + ctrls['pitch'].compute(p_error, p_rate))
 
             # roll calc
             if t_roll is not None:
                 if prev_meas['roll'] is None:
                     prev_meas['roll'] = current_roll
                 
-                r_delta = current_roll - prev_meas['roll']
-                r_rate  = max(-60.0, min(60.0, r_delta / dt))
+                dr = current_roll - prev_meas['roll']
+                r_rate  = max(-60.0, min(60.0, dr / dt))
                 prev_meas['roll'] = current_roll
-                r_err = t_roll - current_roll
+                r_error = t_roll - current_roll
 
-                roll_pwm = angle_to_pwm(ctrls['roll'].compute(r_err, r_rate))
+                roll_pwm = angle_to_pwm(ctrls['roll'].compute(r_error, r_rate))
 
             # yaw calc
             if t_yaw is not None:
                 if prev_meas['yaw'] is None:
                     prev_meas['yaw'] = current_yaw
                 
-                yaw_delta = (current_yaw - prev_meas['yaw'] + 180) % 360 - 180
+                dYaw = (current_yaw - prev_meas['yaw'] + 180) % 360 - 180
                 prev_meas['yaw'] = current_yaw
-                y_rate = max(-60.0, min(60.0, -yaw_delta / dt))
-                y_err = (t_yaw - current_yaw + 180) % 360 - 180
+                y_rate = max(-60.0, min(60.0, -dYaw / dt))
+                y_error = (t_yaw - current_yaw + 180) % 360 - 180
 
-                yaw_pwm = angle_to_pwm(ctrls['yaw'].compute(y_err, y_rate))
+                yaw_pwm = angle_to_pwm(ctrls['yaw'].compute(y_error, y_rate))
 
 
         elif msg.get_type() == 'VFR_HUD':
             airspeed = msg.airspeed
 
+            # speed calc
             if t_speed is not None:
                 if prev_meas['speed'] is None:
                     prev_meas['speed'] = airspeed
                     prev_meas['spd_rate_smoothed'] = 0.0
 
-                spd_delta = airspeed - prev_meas['speed']
+                dv = airspeed - prev_meas['speed']
                 prev_meas['speed'] = airspeed
                 
-                spd_err = t_speed - airspeed
-                raw_rate = -spd_delta / dt
+                speed_error = t_speed - airspeed
+                raw_rate = -dv / dt
                 
                 smoothed_rate = (0.2 * raw_rate) + (0.8 * prev_meas.get('spd_rate_smoothed', 0.0))
                 prev_meas['spd_rate_smoothed'] = smoothed_rate
                 err_rate = max(-10.0, min(10.0, smoothed_rate))
 
-                thrust_shift = ctrls['speed'].compute(spd_err, err_rate)
+                thrust_shift = ctrls['speed'].compute(speed_error, err_rate)
                 current_thrust += thrust_shift * dt
                 current_thrust = max(0.2, min(1.0, current_thrust))
 
@@ -451,9 +518,11 @@ def run():
                 if 'spd_rate_smoothed' in prev_meas:
                     del prev_meas['spd_rate_smoothed']
 
+        # i hate this part
         elif msg.get_type() == 'GLOBAL_POSITION_INT':
             alt_m = msg.relative_alt / 1000.0        
             
+            # this part is outside of the alt calc because it is need in override part
             if prev_meas['alt'] is None:
                 prev_meas['alt'] = alt_m
                 prev_meas['alt_rate_smoothed'] = 0.0
@@ -467,6 +536,7 @@ def run():
             prev_meas['alt_rate_smoothed'] = smoothed_a_rate
             a_rate = smoothed_a_rate
             
+            # override product of usein
             if not override and alt_m < 15.0:
                 print(f"\n[EMERGENCY] Altitude dropped to {alt_m:.1f}m!")
                 print("[EMERGENCY] Hard deck breached. Max throttle and pulling up to 50m.\ncmd> ", end="")
@@ -488,6 +558,7 @@ def run():
                     cmd.update('yaw', None)
                     cmd.set_override(False)
             
+            # ACTUAL alt calc
             else:
                 if t_alt is not None:
                     a_err  = t_alt - alt_m
@@ -497,10 +568,6 @@ def run():
                     alt_pitch = ctrls['alt'].compute(a_err, a_rate)
                     alt_pitch = max(-25.0, min(25.0, alt_pitch))
                     cmd.update('pitch', alt_pitch)
-                
-                else:
-                    if t_speed is None:
-                        current_thrust = 0.6
 
         connection.mav.rc_channels_override_send(
             connection.target_system,
@@ -512,11 +579,13 @@ def run():
             65535, 65535, 65535, 65535                   # rest is blank
         )
 
-        time.sleep(0.02)   # 20 Hz
+        time.sleep(0.05)   # 20 Hz
 
     cam.stop()
     cv2.destroyAllWindows()
     print("\nControl loop stopped.")
+    connection.set_mode('AUTO')
+    print("\nReturning to AUTO...")
 
 init_missions()
 auto_and_arm()
