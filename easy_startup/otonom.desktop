@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Otonom Environment
+Comment=Gazebo ve ArduPilot ortamını başlatır
+Exec=/home/huseyin/Desktop/otonom/start_otonom_env.sh
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true
+Path=/home/huseyin/Desktop/otonom
