@@ -1,0 +1,3 @@
+gio set ~/Desktop/otonom.desktop metadata::trusted true
+chmod +x /home/"user_name"/Desktop/otonom/start_otonom_env.sh
+chmod +x /home/"user_name/Desktop/otonom.desktop
