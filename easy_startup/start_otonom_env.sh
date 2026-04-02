@@ -3,17 +3,12 @@
 set -euo pipefail
 
 PROJECT_DIR="$HOME/Desktop/otonom"
-WAIT_SECONDS=3
+WAIT_SECONDS=1
 LOG_FILE="/tmp/gz_sim_otonom.log"
 
 [ -f "$HOME/.profile" ] && source "$HOME/.profile"
 [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
 
-export GZ_VERSION="${GZ_VERSION:-harmonic}"
-export GZ_SIM_SYSTEM_PLUGIN_PATH="/usr/local/lib/ardupilot_gazebo:${GZ_SIM_SYSTEM_PLUGIN_PATH:-}"
-export GZ_SIM_RESOURCE_PATH="$HOME/SITL_Models/Gazebo/models:$HOME/SITL_Models/Gazebo/worlds:${GZ_SIM_RESOURCE_PATH:-}"
-export IGN_GAZEBO_RESOURCE_PATH="$HOME/SITL_Models/Gazebo/models:$HOME/SITL_Models/Gazebo/worlds:${IGN_GAZEBO_RESOURCE_PATH:-}"
-export GAZEBO_MODEL_PATH="$HOME/SITL_Models/Gazebo/models:${GAZEBO_MODEL_PATH:-}"
 
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
