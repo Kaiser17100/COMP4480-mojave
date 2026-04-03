@@ -1,8 +1,8 @@
 from pymavlink import mavutil
 import time
+import os
 import math
 import threading
-import os
 import cv2  # Added for the camera stream
 
 ## GLOBAL VARIABLES ##
@@ -38,9 +38,9 @@ def enable_gazebo_camera():
     os.system(f'gz topic -t {topic} -m gz.msgs.Boolean -p "data: 1"')
 
 
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 #  CONTROLLERS
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
@@ -122,7 +122,81 @@ class PIDController:
         return output
 
 
+class FuzzyGainScheduler:
+    def __init__(self, error_range=180.0, rate_range=90.0):
+        self.error_range = error_range
+        self.rate_range = rate_range
+        self.labels = ['S', 'M', 'L']
+        self.kp_rules = [
+            [0.75, 0.90, 0.70],
+            [1.15, 1.35, 1.10],
+            [1.85, 2.20, 1.65],
+        ]
+        self.ki_rules = [
+            [1.60, 1.15, 0.65],
+            [0.95, 0.75, 0.45],
+            [0.35, 0.25, 0.20],
+        ]
+        self.kd_rules = [
+            [0.75, 1.25, 1.85],
+            [0.95, 1.45, 2.10],
+            [1.10, 1.75, 2.35],
+        ]
 
+    @staticmethod
+    def _triangle(x, a, b, c):
+        if x <= a or x >= c:
+            return 0.0
+        if a < x <= b:
+            return (x - a) / (b - a)
+        if b < x < c:
+            return (c - x) / (c - b)
+        return 0.0
+
+    @staticmethod
+    def _left_shoulder(x, a, b):
+        if x <= a:
+            return 1.0
+        if x >= b:
+            return 0.0
+        return (b - x) / (b - a)
+
+    @staticmethod
+    def _right_shoulder(x, a, b):
+        if x <= a:
+            return 0.0
+        if x >= b:
+            return 1.0
+        return (x - a) / (b - a)
+
+    def _fuzzify_abs(self, normalized_value):
+        x = clamp(normalized_value, 0.0, 1.0)
+        return {
+            'S': self._left_shoulder(x, 0.20, 0.45),
+            'M': self._triangle(x, 0.20, 0.55, 0.85),
+            'L': self._right_shoulder(x, 0.55, 0.90),
+        }
+
+    def _blend(self, rules, err_mu, rate_mu, default_value=1.0):
+        numerator = 0.0
+        denominator = 0.0
+        for i, err_label in enumerate(self.labels):
+            for j, rate_label in enumerate(self.labels):
+                weight = min(err_mu[err_label], rate_mu[rate_label])
+                if weight <= 0.0:
+                    continue
+                numerator += weight * rules[i][j]
+                denominator += weight
+        return default_value if denominator == 0.0 else numerator / denominator
+
+    def compute_scales(self, error: float, error_rate: float) -> dict:
+        err_mu = self._fuzzify_abs(abs(error) / self.error_range)
+        rate_mu = self._fuzzify_abs(abs(error_rate) / self.rate_range)
+        return {
+            'kp_scale': self._blend(self.kp_rules, err_mu, rate_mu, 1.0),
+            'ki_scale': self._blend(self.ki_rules, err_mu, rate_mu, 1.0),
+            'kd_scale': self._blend(self.kd_rules, err_mu, rate_mu, 1.0),
+        }
 
 
 class HybridController:
@@ -138,9 +212,9 @@ class HybridController:
         return self.pid.compute(error, rate, dt, **gain_scales)
 
 
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 #  SHARED COMMAND STATE
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 class CommandState:
     def __init__(self):
         self._lock = threading.Lock()
@@ -167,9 +241,9 @@ class CommandState:
         with self._lock: self.running = False
 
 
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 #  HELPERS FOR FBWA & RC OVERRIDE
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 def angle_to_pwm(angle: float, max_angle: float) -> int:
     constrained_angle = max(-max_angle, min(max_angle, angle))
     return int(1500 + (constrained_angle / max_angle) * 500)
@@ -197,7 +271,7 @@ def auto_and_arm():
 
 
 def wait_for_takeoff():
-    print(f"[Takeoff] Waiting for plane to climb ≥ {TAKEOFF_ALT_TARGET - TAKEOFF_ALT_THRESH:.0f} m ...")
+    print(f"[Takeoff] Waiting for plane to climb ? {TAKEOFF_ALT_TARGET - TAKEOFF_ALT_THRESH:.0f} m ...")
     last_print = 0.0
     while True:
         msg = connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1.0)
@@ -214,9 +288,9 @@ def wait_for_takeoff():
             break
 
 
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 #  THREADS (INPUT & CAMERA)
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 def input_thread(cmd: CommandState, ctrl_label: str):
     print(f"\n[Input] Controller : {ctrl_label}")
     print("[Input] Commands   : pitch <deg>  roll <deg>  yaw <deg>  alt <val>  speed <val>  reset  quit")
@@ -268,58 +342,26 @@ def input_thread(cmd: CommandState, ctrl_label: str):
 
 
 def camera_thread(cmd: CommandState):
-    # 1. Start the delayed Gazebo trigger in the background
-    threading.Thread(target=enable_gazebo_camera, daemon=True).start()
-
     """ Reads the 1080p GStreamer UDP feed from Gazebo and displays it """
+    threading.Thread(target=enable_gazebo_camera, daemon=True).start()
     print("[Camera] Waiting for Gazebo video stream on port 5600...")
-    window_name = "Talon UAV FPV Camera"
     gazebo_stream = (
         'udpsrc port=5600 ! application/x-rtp, encoding-name=H264, payload=96 ! '
-        'rtpjitterbuffer latency=60 ! rtph264depay ! avdec_h264 ! videoconvert ! '
-        'appsink sync=false drop=true max-buffers=1'
+        'rtph264depay ! avdec_h264 ! videoconvert ! appsink'
     )
+    # Important: Tell OpenCV to use the GStreamer backend
+    cap = cv2.VideoCapture(gazebo_stream, cv2.CAP_GSTREAMER)
 
-    if hasattr(cv2, "startWindowThread"):
-        cv2.startWindowThread()
+    if not cap.isOpened():
+        print("[Camera] Warning: Could not open video stream. Check Gazebo plugins.")
+        return
 
-    cap = None
-    last_retry_print = 0.0
-    consecutive_failures = 0
-
+    print("[Camera] Stream active.")
     while cmd.running:
-        if cap is None or not cap.isOpened():
-            if cap is not None:
-                cap.release()
-            cap = cv2.VideoCapture(gazebo_stream, cv2.CAP_GSTREAMER)
-            if not cap.isOpened():
-                now = time.time()
-                if now - last_retry_print >= 2.0:
-                    print("[Camera] Stream not ready yet, retrying...")
-                    last_retry_print = now
-                time.sleep(0.5)
-                continue
-
-            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-            print("[Camera] Stream active.")
-            consecutive_failures = 0
-
         ret, frame = cap.read()
-        if not ret or frame is None:
-            consecutive_failures += 1
-            if consecutive_failures >= 20:
-                print("[Camera] Frame read failed repeatedly. Reopening stream...")
-                cap.release()
-                cap = None
-                consecutive_failures = 0
-                time.sleep(0.2)
-            else:
-                time.sleep(0.02)
-            continue
+        if not ret: continue
 
-        consecutive_failures = 0
-
-        cv2.imshow(window_name, frame)
+        cv2.imshow("Talon UAV FPV Camera", frame)
 
         # Press 'q' inside the video window to cleanly stop everything
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -327,15 +369,14 @@ def camera_thread(cmd: CommandState):
             cmd.stop()
             break
 
-    if cap is not None:
-        cap.release()
+    cap.release()
     cv2.destroyAllWindows()
     print("[Camera] Stream closed.")
 
 
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 #  CONTROLLER SETUP & MAIN LOOP
-# ─────────────────────────────────────────────
+# ?????????????????????????????????????????????
 def reset_named_controllers(ctrls: dict, *names: str):
     for name in names:
         ctrl = ctrls.get(name)
