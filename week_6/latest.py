@@ -214,18 +214,14 @@ class CommandState:
         self.target_alt = None
         self.target_speed = None
         self.running = True
-        self.override = False
 
     def update(self, axis: str, value):
         with self._lock: setattr(self, f'target_{axis}', value)
 
-    def set_override(self, state: bool):
-        with self._lock: self.override = state
-
     def snapshot(self):
         with self._lock:
             return (self.target_pitch, self.target_roll, self.target_yaw, self.target_alt, self.target_speed,
-                    self.running, self.override)
+                    self.running)
 
     def stop(self):
         with self._lock: self.running = False
@@ -478,7 +474,7 @@ def run():
     current_yaw = cruise_yaw_deg
 
     while True:
-        t_pitch, t_roll, t_yaw, t_alt, t_speed, running, override = cmd.snapshot()
+        t_pitch, t_roll, t_yaw, t_alt, t_speed, running = cmd.snapshot()
         desired_pitch = 0.0
         if not running: break
 
