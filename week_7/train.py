@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import os
 
 # Yolun doğruluğunu kontrol edelim
-yaml_path = r'/home/alice/Desktop/dataset/data.yaml'
+yaml_path = r'/home/username/Desktop/dataset/data.yaml'
 if not os.path.exists(yaml_path):
     print("HATA: data.yaml dosyası belirttiğin yolda bulunamadı!")
 else:
