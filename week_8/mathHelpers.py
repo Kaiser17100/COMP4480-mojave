@@ -18,7 +18,7 @@ def compute_center_deviation(x1, y1, x2, y2, frame_w, frame_h):
     img_cx = frame_w / 2.0
     img_cy = frame_h / 2.0
 
-    dx = obj_cx - img_cx   # + ise sağda, - ise solda
+    dx = obj_cx - img_cx
     dy = obj_cy - img_cy
 
     dx_norm = dx / img_cx if img_cx != 0 else 0.0
