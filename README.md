@@ -3,10 +3,12 @@
 This is project for COMP 4480 class, in this class our objective is to create a program that is ready for ArduPilot Simulation of Teknofest Fighter UAV Competition
 ## Current Abilities of the Project:
 - Manual Mission Adding
-- PID Controller for Pitch, Yaw, Roll, Altitude and Speed values of the plane
-- Fuzzy Controller for Pitch, Yaw, Roll, Altitude and Speed values of the plane
-- Camera connection via OpenCV
-- Ability to click to a position on the camera feed and locking on the that direction
+- PID Controller
+- Fuzzy Controller
+- Hybrid Controller (WIP)
+- Camera connection via OpenCV/Gstreamer
+- UAV Detection with Yolo 11
+- Ability to detect a UAV and take necessery maneuvers to follow it
 ## Team Name: Mojave
 - Kaiser17100 -> https://github.com/Kaiser17100
 - dilanisik -> https://github.com/dilanisik
