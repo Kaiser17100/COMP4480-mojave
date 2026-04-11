@@ -130,6 +130,7 @@ def make_controllers() -> dict:
     }
 
 
+# currently does not do any maneuvers in the air because it was hard to test plane turning
 def run():
     ctrls = make_controllers()
 
