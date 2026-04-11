@@ -1,0 +1,3 @@
+Gazebo: gz sim -v4 -r ~/SITL_Models/Gazebo/worlds/world_two_talons.sdf 
+Plane 1 (Observer): sim_vehicle.py -v ArduPlane -f JSON --model JSON:127.0.0.1:9012 --add-param-file=$HOME/SITL_Models/Gazebo/config/mini_talon_vtail.param --console -I0 --out=127.0.0.1:14580 --custom-location=38.700907,27.453879,10,90 --sysid 1 
+Plane 2 (Target): sim_vehicle.py -v ArduPlane -f JSON --model JSON:127.0.0.1:9012 --add-param-file=$HOME/SITL_Models/Gazebo/config/mini_talon_vtail.param --console --map -I1 --out=127.0.0.1:14581 --custom-location=38.700907,27.454020,0,90 --sysid 2
