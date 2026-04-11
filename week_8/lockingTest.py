@@ -1,4 +1,4 @@
-## HOURS WASTED: 63
+## HOURS WASTED: 64
 
 # Notes: 
 # 
@@ -223,6 +223,7 @@ def main_loop():
                 cmd.update('pitch', dy_norm * AXIS_BOUNDS['pitch'][1] * AXIS_TURN_STRENGHT)
 
         cv2.imshow("YOLOv8 Pose UDP Inference", frame)
+        cv2.waitKey(1)
         ## END OF AI RELATED STUFF ##
         
         # speed is not implemented
