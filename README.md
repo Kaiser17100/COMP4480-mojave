@@ -7,7 +7,7 @@ This is project for COMP 4480 class, in this class our objective is to create a 
 - Fuzzy Controller
 - Hybrid Controller (WIP)
 - Camera connection via OpenCV/Gstreamer
-- UAV Detection with Yolo 11
+- UAV Detection with Yolo 8
 - Ability to detect a UAV and take necessery maneuvers to follow it
 ## Team Name: Mojave
 - Kaiser17100 -> https://github.com/Kaiser17100
