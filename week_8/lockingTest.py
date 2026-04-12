@@ -1,4 +1,4 @@
-## HOURS WASTED: 64
+## HOURS WASTED: 65
 
 # Notes: 
 # 
@@ -31,13 +31,15 @@ MODEL_PATH = Path.home() / "Desktop" / "runs" / "pose" / "train" / "weights" / "
 
 TAKEOFF_ALT_TARGET = 50.0
 TAKEOFF_ALT_THRESH = 5.0
-TIMER_MAX = 4.0
+TIMER_MAX = 0.5
 DX_CONST = 0.25
 DT_MIN = 0.01
 PREV_MEAS_RATE_CONST = 0.75
 CONF = 0.25
 IMG_SIZE = 640
 AXIS_TURN_STRENGHT = 0.8
+FOV_X_DEG = 80.0 
+FOV_Y_DEG = 60.0
 PREARM_CONST = mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK
 
 ## HELPERS ##
@@ -102,9 +104,16 @@ def wait_for_takeoff():
 def enable_gazebo_camera():
     print("[Gazebo] Sending 'enable' signal to Gazebo...")
     topic = '/world/runway/model/observer/link/base_link/sensor/nose_camera/image/enable_streaming'
-    os.system(f'gz topic -t {topic} -m gz.msgs.Boolean -p "data: 1"')
+    os.system(f'gz topic -t {topic} -m gz.msgs.Boolean -p "data: true"')
 
-    pipeline = "udpsrc port=5600 ! application/x-rtp, payload=96 ! rtph264depay ! avdec_h264 ! videoconvert ! appsink drop=true sync=false"
+    time.sleep(2)
+    pipeline = (
+        "udpsrc port=5600 address=127.0.0.1 ! "
+        "application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96 ! "
+        "rtph264depay ! avdec_h264 ! videoconvert ! "
+        "video/x-raw, format=BGR ! "
+        "appsink drop=true sync=false max-buffers=1"
+    )
     
     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
     
@@ -140,10 +149,14 @@ def make_controllers() -> dict:
                                    integral_zone=12.0, rate_filter_tau=0.20),
             fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=12.0, rate_range=6.0),
         ),
+        'vision_pan': controllers.PIDController(kp=35.0, ki=5.0, kd=10.0, output_limit=40.0),
+        'vision_tilt': controllers.PIDController(kp=20.0, ki=2.0, kd=5.0, output_limit=25.0),
     }
 
 
 def main_loop():
+    cam = enable_gazebo_camera()
+
     if not MODEL_PATH.exists():
         print("Yolo Model does not exist")
         return
@@ -153,8 +166,6 @@ def main_loop():
     ctrls = make_controllers()
 
     wait_for_takeoff()
-
-    cam = enable_gazebo_camera()
 
     if not cam.isOpened():
         print("[OpenCV] ERROR: Failed to open GStreamer pipeline.")
@@ -181,6 +192,10 @@ def main_loop():
     current_yaw = cruise_yaw_deg
     current_roll_rate = current_pitch_rate = current_yaw_rate = 0.0
     current_alt = TAKEOFF_ALT_TARGET
+    timer = 0.0
+    smoothed_dx = 0.0
+    smoothed_dy = 0.0
+    filter_alpha = 0.3
 
     #override = False
 
@@ -195,9 +210,14 @@ def main_loop():
         results = model.predict(frame, imgsz=IMG_SIZE, conf=CONF, verbose=False)
         result = results[0]
 
+        now = time.time()
+        dt = max(now - prev_time, DT_MIN)
+        prev_time = now
+
         cv2.circle(frame, (w // 2, h // 2), 5, (0, 255, 255), -1)
 
         # if target plane is visible on the screen
+        timer += dt
         if result.boxes is not None and len(result.boxes) > 0:
             boxes_xyxy = result.boxes.xyxy.cpu().numpy()
             confs = result.boxes.conf.cpu().numpy()
@@ -209,6 +229,10 @@ def main_loop():
 
             # draw the bounding box and confidence string
             obj_cx, obj_cy, dx_norm, dy_norm = mathHelpers.compute_center_deviation(x1, y1, x2, y2, w, h)
+
+            smoothed_dx = (filter_alpha * dx_norm) + ((1.0 - filter_alpha) * smoothed_dx)
+            smoothed_dy = (filter_alpha * dy_norm) + ((1.0 - filter_alpha) * smoothed_dy)
+
             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
             cv2.circle(frame, (int(obj_cx), int(obj_cy)), 5, (0, 0, 255), -1)
             cv2.line(frame, (w // 2, h // 2), (int(obj_cx), int(obj_cy)), (255, 0, 0), 2)
@@ -216,11 +240,18 @@ def main_loop():
             text1 = f"conf={score:.2f}"
             cv2.putText(frame, text1, (int(x1), max(20, int(y1) - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
-            # change the target roll according to the target
-            if dx_norm != 0.0000000:
-                cmd.update('roll', dx_norm * AXIS_BOUNDS['roll'][1] * AXIS_TURN_STRENGHT)
-            if dy_norm != 0.0000000:
-                cmd.update('pitch', dy_norm * AXIS_BOUNDS['pitch'][1] * AXIS_TURN_STRENGHT)
+            desired_roll_from_vision = ctrls['vision_pan'].compute(smoothed_dx - 0.0, 0.0, dt)
+            desired_pitch_from_vision = ctrls['vision_tilt'].compute(0.0 - smoothed_dy, 0.0, dt)
+            cmd.update('roll', desired_roll_from_vision)
+            cmd.update('pitch', desired_pitch_from_vision)
+            cmd.update('yaw', None)
+
+        else:
+            cmd.update('roll', None)
+            cmd.update('pitch', None)
+
+            if cmd.snapshot()[2] is None:
+                cmd.update('yaw', current_yaw)
 
         cv2.imshow("YOLOv8 Pose UDP Inference", frame)
         cv2.waitKey(1)
@@ -243,10 +274,6 @@ def main_loop():
             elif msg_type == 'GLOBAL_POSITION_INT':
                 current_alt = msg.relative_alt / 1000.0
             msg = connection.recv_match(type=['ATTITUDE', 'GLOBAL_POSITION_INT', 'VFR_HUD'], blocking=False)
-
-        now = time.time()
-        dt = max(now - prev_time, DT_MIN)
-        prev_time = now
 
         # alt rate calc
         if prev_meas['alt'] is None:
