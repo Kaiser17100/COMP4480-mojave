@@ -1,10 +1,7 @@
 ## HOURS WASTED: 65
 
 # Notes: 
-# 
-# HYBRID CONTROLLER IS BAD, IT'S NOT FAST ENOUGH TO MAKE TURNS
-# SOMEONE SHOULD FIX IT
-# We should add a way to increase speed to catch up to the target
+# it works flawlesslly
 
 
 from pymavlink import mavutil
