@@ -9,6 +9,7 @@ class CommandState:
         self.target_yaw = None
         self.target_alt = None
         self.target_speed = None
+        self.running = True
         self.override = False
 
     def update(self, axis: str, value):
@@ -19,5 +20,6 @@ class CommandState:
 
     def snapshot(self):
         with self._lock:
-            return (self.target_pitch, self.target_roll, self.target_yaw, self.target_alt,
-                    self.target_speed)
+            return (self.target_pitch, self.target_roll, self.target_yaw, self.target_alt, self.target_speed,
+                    self.running, self.override)
+

@@ -163,7 +163,9 @@ def run():
     start_maneuvers = False
 
     while True:
-        t_pitch, t_roll, t_yaw, t_alt, t_speed = cmd.snapshot()
+        t_pitch, t_roll, t_yaw, t_alt, t_speed, running, override_cmd = cmd.snapshot()
+        if not running:
+            break
 
         msg = connection.recv_match(type=['ATTITUDE', 'GLOBAL_POSITION_INT', 'VFR_HUD'], blocking=False)
         while msg is not None:

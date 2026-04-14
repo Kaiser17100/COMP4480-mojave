@@ -24,7 +24,7 @@ AXIS_BOUNDS = {
     'speed': (13, 30)
 }
 
-MODEL_PATH = Path.home() / "Desktop" / "runs" / "pose" / "train" / "weights" / "best.pt"
+MODEL_PATH = Path.home() / "Desktop" / "yolov2" / "runs" / "talon_pose_v1" / "weights" / "best.pt"
 
 TAKEOFF_ALT_TARGET = 50.0
 TAKEOFF_ALT_THRESH = 5.0
@@ -189,6 +189,7 @@ def main_loop():
     current_yaw = cruise_yaw_deg
     current_roll_rate = current_pitch_rate = current_yaw_rate = 0.0
     current_alt = TAKEOFF_ALT_TARGET
+    current_spd = 15.0
     timer = 0.0
     smoothed_dx = 0.0
     smoothed_dy = 0.0
@@ -242,10 +243,24 @@ def main_loop():
             cmd.update('roll', desired_roll_from_vision)
             cmd.update('pitch', desired_pitch_from_vision)
             cmd.update('yaw', None)
+            
+            # Distance approximation heuristic for speed control
+            # Adjusts speed to maintain a target bounding box area size
+            box_area = (x2 - x1) * (y2 - y1)
+            frame_area = w * h
+            area_ratio = box_area / frame_area
+            
+            target_area_ratio = 0.02 # Assuming target occupies ~2% of the frame when at ideal following distance
+            area_error = target_area_ratio - area_ratio
+            speed_correction = area_error * 100.0
+            
+            desired_speed = mathHelpers.clamp(20.0 + speed_correction, AXIS_BOUNDS['speed'][0], AXIS_BOUNDS['speed'][1])
+            cmd.update('speed', desired_speed)
 
         else:
             cmd.update('roll', None)
             cmd.update('pitch', None)
+            cmd.update('speed', None)
 
             if cmd.snapshot()[2] is None:
                 cmd.update('yaw', current_yaw)
@@ -253,10 +268,10 @@ def main_loop():
         cv2.imshow("YOLOv8 Pose UDP Inference", frame)
         cv2.waitKey(1)
         ## END OF AI RELATED STUFF ##
-        
-        # speed is not implemented
-        t_pitch, t_roll, t_yaw, t_alt, t_speed = cmd.snapshot()
-        print(f"Pitch: {t_pitch}, Roll: {t_roll}")
+
+        t_pitch, t_roll, t_yaw, t_alt, t_speed, running, override = cmd.snapshot()
+        if not running: break
+        print(f"Pitch: {t_pitch}, Roll: {t_roll}, Speed: {t_speed}")
         
         msg = connection.recv_match(type=['ATTITUDE', 'GLOBAL_POSITION_INT', 'VFR_HUD'], blocking=False)
         while msg is not None:
@@ -270,6 +285,8 @@ def main_loop():
                 current_yaw_rate = math.degrees(getattr(msg, 'yawspeed', 0.0))
             elif msg_type == 'GLOBAL_POSITION_INT':
                 current_alt = msg.relative_alt / 1000.0
+            elif msg_type == 'VFR_HUD':
+                current_spd = msg.airspeed
             msg = connection.recv_match(type=['ATTITUDE', 'GLOBAL_POSITION_INT', 'VFR_HUD'], blocking=False)
 
         # alt rate calc
@@ -280,6 +297,15 @@ def main_loop():
         a_rate = mathHelpers.clamp(a_rate, -12.0, 12.0)
         prev_meas['alt_rate_smoothed'] = a_rate
         prev_meas['alt'] = current_alt
+        
+        # speed rate calc
+        if prev_meas['speed'] is None:
+            prev_meas['speed'] = current_spd
+        spd_delta = current_spd - prev_meas['speed']
+        err_rate = (DX_CONST * (-spd_delta / dt)) + (PREV_MEAS_RATE_CONST * prev_meas['spd_rate_smoothed'])
+        err_rate = mathHelpers.clamp(err_rate, -8.0, 8.0)
+        prev_meas['spd_rate_smoothed'] = err_rate
+        prev_meas['speed'] = current_spd
 
         # pitch calc dependent on alt
         if t_alt is not None:
@@ -328,9 +354,15 @@ def main_loop():
         low, high = AXIS_BOUNDS['roll']
         target_roll = mathHelpers.clamp(desired_roll + roll_correction, low, high)
 
-        # i will not touch calc related to thrust this shit crashes the plane 
+        # speed control / desired thrust calc
+        if t_speed is not None:
+            desired_thrust = mathHelpers.clamp(trim_thrust + ctrls['speed'].compute(t_speed - current_spd, err_rate, dt), 0.2, 1.0)
+        else:
+            desired_thrust = trim_thrust
+
+        # updated thrust calculations with speed control
         thrust_step_limit = 0.8 * dt
-        current_thrust += mathHelpers.clamp(trim_thrust - current_thrust, -thrust_step_limit, thrust_step_limit)
+        current_thrust += mathHelpers.clamp(desired_thrust - current_thrust, -thrust_step_limit, thrust_step_limit)
         current_thrust = mathHelpers.clamp(current_thrust, 0.2, 1.0)
 
         # send the dnew vals to the plane
