@@ -36,6 +36,22 @@ connection.mav.request_data_stream_send(
     1
 )
 
+# publish gps location port 14582        
+pub_connection = mavutil.mavlink_connection('udpout:127.0.0.1:14582', source_system=2, source_component=1)
+
+import threading
+def heartbeat_loop():
+    while True:
+        pub_connection.mav.heartbeat_send(
+            mavutil.mavlink.MAV_TYPE_FIXED_WING,
+            mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
+            0, 0, 0
+        )
+        time.sleep(1)
+
+threading.Thread(target=heartbeat_loop, daemon=True).start()
+
+
 ## HELPERS FOR FBWA & RC OVERRIDE ##
 
 # rng movement decider resets other axises
@@ -85,6 +101,11 @@ def wait_for_takeoff():
     while True:
         msg = connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1.0)
         if msg is None: continue
+
+        pub_connection.mav.global_position_int_send(
+            msg.time_boot_ms, msg.lat, msg.lon, msg.alt,
+            msg.relative_alt, msg.vx, msg.vy, msg.vz, msg.hdg
+        )
 
         alt_m = msg.relative_alt / 1000.0
         now = time.time()
@@ -178,6 +199,10 @@ def run():
                 current_pitch_rate = math.degrees(getattr(msg, 'pitchspeed', 0.0))
                 current_yaw_rate = math.degrees(getattr(msg, 'yawspeed', 0.0))
             elif msg_type == 'GLOBAL_POSITION_INT':
+                pub_connection.mav.global_position_int_send(
+                    msg.time_boot_ms, msg.lat, msg.lon, msg.alt,
+                    msg.relative_alt, msg.vx, msg.vy, msg.vz, msg.hdg
+                )
                 current_alt = msg.relative_alt / 1000.0
             msg = connection.recv_match(type=['ATTITUDE', 'GLOBAL_POSITION_INT', 'VFR_HUD'], blocking=False)
 

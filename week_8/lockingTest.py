@@ -1,6 +1,6 @@
 ## HOURS WASTED: 65
 
-# Notes: 
+# Notes:
 # it works flawlesslly
 
 
@@ -24,7 +24,7 @@ AXIS_BOUNDS = {
     'speed': (13, 30)
 }
 
-MODEL_PATH = Path.home() / "Desktop" / "yolov2" / "runs" / "talon_pose_v1" / "weights" / "best.pt"
+MODEL_PATH = Path.home() / "Desktop" / "yolov2" / "runs" / "train" / "weights" / "best.pt"
 
 TAKEOFF_ALT_TARGET = 50.0
 TAKEOFF_ALT_THRESH = 5.0
@@ -35,7 +35,7 @@ PREV_MEAS_RATE_CONST = 0.75
 CONF = 0.25
 IMG_SIZE = 640
 AXIS_TURN_STRENGHT = 0.8
-FOV_X_DEG = 80.0 
+FOV_X_DEG = 80.0
 FOV_Y_DEG = 60.0
 PREARM_CONST = mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK
 
@@ -52,6 +52,21 @@ connection.mav.request_data_stream_send(
     20,
     1
 )
+#subscribe to port 14582
+target_connection = mavutil.mavlink_connection("udpin:127.0.0.1:14582")
+
+def connect_target():
+    print("Waiting for Target Plane heartbeat...")
+    target_connection.wait_heartbeat()
+    print("Connected to Target Plane...")
+    target_connection.mav.request_data_stream_send(
+        target_connection.target_system,
+        target_connection.target_component,
+        mavutil.mavlink.MAV_DATA_STREAM_ALL,
+        20,
+        1
+    )
+
 
 def wait_for_prearm():
     print("Waiting for pre-arm...")
@@ -61,6 +76,7 @@ def wait_for_prearm():
         if msg.onboard_control_sensors_health & PREARM_CONST == PREARM_CONST:
             print("Pre-arm good...")
             break
+
 
 def auto_and_arm():
     print("Setting Mode to TAKEOFF...")
@@ -72,14 +88,15 @@ def auto_and_arm():
             connection.target_system, connection.target_component,
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0
         )
-        
+
         msg = connection.recv_match(type='HEARTBEAT', blocking=True, timeout=1.0)
-        
+
         if msg and (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
             print("Plane is successfully Armed!")
             break
-            
+
         time.sleep(1.0)
+
 
 def wait_for_takeoff():
     print(f"[Takeoff] Waiting for plane to climb ? {TAKEOFF_ALT_TARGET - TAKEOFF_ALT_THRESH:.0f} m ...")
@@ -98,6 +115,7 @@ def wait_for_takeoff():
             print(f"[Takeoff] Target altitude reached. Switching to FBWA outer loops ...")
             break
 
+
 def enable_gazebo_camera():
     print("[Gazebo] Sending 'enable' signal to Gazebo...")
     topic = '/world/runway/model/observer/link/base_link/sensor/nose_camera/image/enable_streaming'
@@ -111,10 +129,11 @@ def enable_gazebo_camera():
         "video/x-raw, format=BGR ! "
         "appsink drop=true sync=false max-buffers=1"
     )
-    
+
     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    
+
     return cap
+
 
 ## CONTROLLER SETUP & MAIN LOOP
 
@@ -123,27 +142,27 @@ def make_controllers() -> dict:
     return {
         'pitch_att': controllers.HybridController(
             pid_ctrl=controllers.PIDController(kp=0.45, ki=0.10, kd=0.08, integral_limit=20.0, output_limit=15.0,
-                                   integral_zone=18.0, rate_filter_tau=0.10),
+                                               integral_zone=18.0, rate_filter_tau=0.10),
             fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=25.0, rate_range=40.0),
         ),
         'roll_att': controllers.HybridController(
             pid_ctrl=controllers.PIDController(kp=0.50, ki=0.10, kd=0.08, integral_limit=25.0, output_limit=18.0,
-                                   integral_zone=20.0, rate_filter_tau=0.10),
+                                               integral_zone=20.0, rate_filter_tau=0.10),
             fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=35.0, rate_range=50.0),
         ),
         'heading': controllers.HybridController(
             pid_ctrl=controllers.PIDController(kp=0.40, ki=0.035, kd=0.05, integral_limit=80.0, output_limit=35.0,
-                                   integral_zone=90.0, rate_filter_tau=0.12),
+                                               integral_zone=90.0, rate_filter_tau=0.12),
             fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=120.0, rate_range=40.0),
         ),
         'altitude': controllers.HybridController(
             pid_ctrl=controllers.PIDController(kp=0.65, ki=0.08, kd=0.04, integral_limit=60.0, output_limit=18.0,
-                                   integral_zone=35.0, rate_filter_tau=0.18),
+                                               integral_zone=35.0, rate_filter_tau=0.18),
             fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=40.0, rate_range=8.0),
         ),
         'speed': controllers.HybridController(
             pid_ctrl=controllers.PIDController(kp=0.07, ki=0.03, kd=0.01, integral_limit=10.0, output_limit=0.35,
-                                   integral_zone=12.0, rate_filter_tau=0.20),
+                                               integral_zone=12.0, rate_filter_tau=0.20),
             fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=12.0, rate_range=6.0),
         ),
         'vision_pan': controllers.PIDController(kp=35.0, ki=5.0, kd=10.0, output_limit=40.0),
@@ -157,7 +176,7 @@ def main_loop():
     if not MODEL_PATH.exists():
         print("Yolo Model does not exist")
         return
-    
+
     model = YOLO(str(MODEL_PATH))
 
     ctrls = make_controllers()
@@ -195,7 +214,13 @@ def main_loop():
     smoothed_dy = 0.0
     filter_alpha = 0.3
 
-    #override = False
+    current_lat = None
+    current_lon = None
+    target_lat = None
+    target_lon = None
+    target_alt = TAKEOFF_ALT_TARGET
+
+    # override = False
 
     while True:
         ## AI RELATED STUFF ##
@@ -237,33 +262,48 @@ def main_loop():
 
             text1 = f"conf={score:.2f}"
             cv2.putText(frame, text1, (int(x1), max(20, int(y1) - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            
+
             desired_roll_from_vision = ctrls['vision_pan'].compute(smoothed_dx - 0.0, 0.0, dt)
             desired_pitch_from_vision = ctrls['vision_tilt'].compute(0.0 - smoothed_dy, 0.0, dt)
             cmd.update('roll', desired_roll_from_vision)
             cmd.update('pitch', desired_pitch_from_vision)
             cmd.update('yaw', None)
-            
+            cmd.update('alt', None)
+
             # Distance approximation heuristic for speed control
-            # Adjusts speed to maintain a target bounding box area size
-            box_area = (x2 - x1) * (y2 - y1)
-            frame_area = w * h
-            area_ratio = box_area / frame_area
-            
-            target_area_ratio = 0.02 # Assuming target occupies ~2% of the frame when at ideal following distance
-            area_error = target_area_ratio - area_ratio
-            speed_correction = area_error * 100.0
-            
-            desired_speed = mathHelpers.clamp(20.0 + speed_correction, AXIS_BOUNDS['speed'][0], AXIS_BOUNDS['speed'][1])
-            cmd.update('speed', desired_speed)
+            # We use GPS distance to maintain a solid follow distance and keep the target in frame
+            FOLLOW_DISTANCE = 25.0  # safe distance in meters
+            if current_lat is not None and target_lat is not None:
+                dist = mathHelpers.get_distance(current_lat, current_lon, target_lat, target_lon)
+                dist_error = dist - FOLLOW_DISTANCE
+                speed_correction = dist_error * 0.8
+                desired_speed = mathHelpers.clamp(20.0 + speed_correction, AXIS_BOUNDS['speed'][0], AXIS_BOUNDS['speed'][1])
+                cmd.update('speed', desired_speed)
+            else:
+                box_area = (x2 - x1) * (y2 - y1)
+                frame_area = w * h
+                area_ratio = box_area / frame_area
+
+                target_area_ratio = 0.02  # Assuming target occupies ~2% of the frame when at ideal following distance
+                area_error = target_area_ratio - area_ratio
+                speed_correction = area_error * 100.0
+
+                desired_speed = mathHelpers.clamp(20.0 + speed_correction, AXIS_BOUNDS['speed'][0], AXIS_BOUNDS['speed'][1])
+                cmd.update('speed', desired_speed)
 
         else:
             cmd.update('roll', None)
             cmd.update('pitch', None)
-            cmd.update('speed', None)
+            cmd.update('speed', 20.0)
 
-            if cmd.snapshot()[2] is None:
-                cmd.update('yaw', current_yaw)
+            if current_lat is not None and target_lat is not None:
+                desired_yaw = mathHelpers.get_bearing(current_lat, current_lon, target_lat, target_lon)
+                cmd.update('yaw', desired_yaw)
+                cmd.update('alt', target_alt)
+            else:
+                if cmd.snapshot()[2] is None:
+                    cmd.update('yaw', current_yaw)
+                cmd.update('alt', TAKEOFF_ALT_TARGET)
 
         cv2.imshow("YOLOv8 Pose UDP Inference", frame)
         cv2.waitKey(1)
@@ -272,7 +312,7 @@ def main_loop():
         t_pitch, t_roll, t_yaw, t_alt, t_speed, running, override = cmd.snapshot()
         if not running: break
         print(f"Pitch: {t_pitch}, Roll: {t_roll}, Speed: {t_speed}")
-        
+
         msg = connection.recv_match(type=['ATTITUDE', 'GLOBAL_POSITION_INT', 'VFR_HUD'], blocking=False)
         while msg is not None:
             msg_type = msg.get_type()
@@ -285,9 +325,18 @@ def main_loop():
                 current_yaw_rate = math.degrees(getattr(msg, 'yawspeed', 0.0))
             elif msg_type == 'GLOBAL_POSITION_INT':
                 current_alt = msg.relative_alt / 1000.0
+                current_lat = msg.lat / 1e7
+                current_lon = msg.lon / 1e7
             elif msg_type == 'VFR_HUD':
                 current_spd = msg.airspeed
             msg = connection.recv_match(type=['ATTITUDE', 'GLOBAL_POSITION_INT', 'VFR_HUD'], blocking=False)
+            
+        target_msg = target_connection.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
+        while target_msg is not None:
+            target_lat = target_msg.lat / 1e7
+            target_lon = target_msg.lon / 1e7
+            target_alt = target_msg.relative_alt / 1000.0
+            target_msg = target_connection.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
 
         # alt rate calc
         if prev_meas['alt'] is None:
@@ -297,7 +346,7 @@ def main_loop():
         a_rate = mathHelpers.clamp(a_rate, -12.0, 12.0)
         prev_meas['alt_rate_smoothed'] = a_rate
         prev_meas['alt'] = current_alt
-        
+
         # speed rate calc
         if prev_meas['speed'] is None:
             prev_meas['speed'] = current_spd
@@ -324,7 +373,7 @@ def main_loop():
             low, high = AXIS_BOUNDS['roll']
             heading_error = mathHelpers.wrap_angle_deg(t_yaw - current_yaw)
             desired_roll = mathHelpers.clamp(ctrls['heading'].compute(heading_error, -current_yaw_rate, dt), low, high)
-        
+
         # normal roll calc
         elif t_roll is not None:
             low, high = AXIS_BOUNDS['roll']
@@ -333,16 +382,16 @@ def main_loop():
             desired_roll = 0.0
 
         # NOT IMPLEMENTED: if plane decides to go to low just in case
-        #if current_alt < TAKEOFF_ALT_TARGET:
+        # if current_alt < TAKEOFF_ALT_TARGET:
         #    cmd.update('pitch', 0.0)
         #    cmd.update('roll', 0.0)
         #    cmd.update('alt', TAKEOFF_ALT_TARGET)
         #    override = True
 
-        #elif current_alt >= TAKEOFF_ALT_TARGET and override:
+        # elif current_alt >= TAKEOFF_ALT_TARGET and override:
         #    override = False
 
-        # put the desired vals at hybrid controller 
+        # put the desired vals at hybrid controller
         pitch_error = desired_pitch - current_pitch
         roll_error = desired_roll - current_roll
         pitch_correction = ctrls['pitch_att'].compute(pitch_error, -current_pitch_rate, dt)
@@ -356,7 +405,8 @@ def main_loop():
 
         # speed control / desired thrust calc
         if t_speed is not None:
-            desired_thrust = mathHelpers.clamp(trim_thrust + ctrls['speed'].compute(t_speed - current_spd, err_rate, dt), 0.2, 1.0)
+            desired_thrust = mathHelpers.clamp(
+                trim_thrust + ctrls['speed'].compute(t_speed - current_spd, err_rate, dt), 0.2, 1.0)
         else:
             desired_thrust = trim_thrust
 
@@ -378,6 +428,7 @@ def main_loop():
 
 
 if __name__ == '__main__':
+    connect_target()
     wait_for_prearm()
     auto_and_arm()
     main_loop()
