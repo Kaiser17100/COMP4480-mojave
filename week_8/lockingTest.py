@@ -219,6 +219,9 @@ def main_loop():
     target_lat = None
     target_lon = None
     target_alt = TAKEOFF_ALT_TARGET
+    
+    last_vision_yaw = None
+    last_vision_pitch = None
 
     # override = False
 
@@ -263,11 +266,19 @@ def main_loop():
             text1 = f"conf={score:.2f}"
             cv2.putText(frame, text1, (int(x1), max(20, int(y1) - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            desired_roll_from_vision = ctrls['vision_pan'].compute(smoothed_dx - 0.0, 0.0, dt)
-            desired_pitch_from_vision = ctrls['vision_tilt'].compute(0.0 - smoothed_dy, 0.0, dt)
-            cmd.update('roll', desired_roll_from_vision)
+            # Convert visual offsets to real-world heading and pitch targets
+            angle_offset = smoothed_dx * (FOV_X_DEG / 2.0)
+            desired_yaw_from_vision = mathHelpers.wrap_angle_deg(current_yaw + angle_offset)
+            
+            pitch_offset = -smoothed_dy * (FOV_Y_DEG / 2.0)
+            desired_pitch_from_vision = current_pitch + pitch_offset
+            
+            last_vision_yaw = desired_yaw_from_vision
+            last_vision_pitch = desired_pitch_from_vision
+
+            cmd.update('yaw', desired_yaw_from_vision)
             cmd.update('pitch', desired_pitch_from_vision)
-            cmd.update('yaw', None)
+            cmd.update('roll', None)
             cmd.update('alt', None)
 
             # Distance approximation heuristic for speed control
@@ -292,18 +303,34 @@ def main_loop():
                 cmd.update('speed', desired_speed)
 
         else:
-            cmd.update('roll', None)
-            cmd.update('pitch', None)
-            cmd.update('speed', 20.0)
+            # Acknowledgement and memory system
+            if last_vision_yaw is not None and last_vision_pitch is not None:
+                yaw_reached = abs(mathHelpers.wrap_angle_deg(current_yaw - last_vision_yaw)) <= 5.0
+                pitch_reached = abs(current_pitch - last_vision_pitch) <= 5.0
+                
+                if yaw_reached and pitch_reached:
+                    last_vision_yaw = None
+                    last_vision_pitch = None
+                else:
+                    cmd.update('yaw', last_vision_yaw)
+                    cmd.update('pitch', last_vision_pitch)
+                    cmd.update('roll', None)
+                    cmd.update('alt', None)
+                    cmd.update('speed', 20.0)
+                    
+            if last_vision_yaw is None: # We either never saw it, or we reached the target and lost it
+                cmd.update('roll', None)
+                cmd.update('pitch', None)
+                cmd.update('speed', 20.0)
 
-            if current_lat is not None and target_lat is not None:
-                desired_yaw = mathHelpers.get_bearing(current_lat, current_lon, target_lat, target_lon)
-                cmd.update('yaw', desired_yaw)
-                cmd.update('alt', target_alt)
-            else:
-                if cmd.snapshot()[2] is None:
-                    cmd.update('yaw', current_yaw)
-                cmd.update('alt', TAKEOFF_ALT_TARGET)
+                if current_lat is not None and target_lat is not None:
+                    desired_yaw = mathHelpers.get_bearing(current_lat, current_lon, target_lat, target_lon)
+                    cmd.update('yaw', desired_yaw)
+                    cmd.update('alt', target_alt)
+                else:
+                    if cmd.snapshot()[2] is None:
+                        cmd.update('yaw', current_yaw)
+                    cmd.update('alt', TAKEOFF_ALT_TARGET)
 
         cv2.imshow("YOLOv8 Pose UDP Inference", frame)
         cv2.waitKey(1)
