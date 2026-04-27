@@ -448,7 +448,7 @@ def main_loop():
             mathHelpers.angle_to_pwm(target_roll, AXIS_BOUNDS['roll'][1]),  # Roll
             mathHelpers.angle_to_pwm(target_pitch, AXIS_BOUNDS['pitch'][1]),  # Pitch
             mathHelpers.throttle_to_pwm(current_thrust),  # Throttle
-            1500,  # Yaw
+            0,  # Yaw (0 releases override to let ArduPilot auto-coordinate rudder)
             0, 0, 0, 0
         )
         time.sleep(0.05)  # 20Hz
