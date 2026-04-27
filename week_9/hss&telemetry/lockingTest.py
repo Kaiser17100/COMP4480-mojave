@@ -3,9 +3,7 @@
 # Notes:
 # need the send telemetry data
 
-
-from ast import Not
-from week_8 import telemetry
+import telemetry
 from pymavlink import mavutil
 from pathlib import Path
 from ultralytics import YOLO
@@ -15,13 +13,14 @@ import mathHelpers
 import time
 import math
 import cv2
+import numpy as np
 import commandState as CS
 import telemetry
 import requests
 
-BASE_URL = ""
-USERNAME = "Mojave"
-PASSWORD = "idk"
+BASE_URL = "http://127.0.0.1:10001"
+USERNAME = "anafarta"
+PASSWORD = "123"
 TEAM_NO = 4
 
 ## GLOBAL VARIABLES ##
@@ -49,7 +48,7 @@ PREARM_CONST = mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK
 MAX_DISTANCE_BETWEEN_ENEMY = 30.0
 AUTONOMOUS_FLIGHT_STATUS = 1
 session = requests.Session()
-GPS_TIME = []
+GPS_TIME = {"saat": 1, "dakika": 1, "saniye": 1, "milisaniye": 1}
 
 ## HELPERS ##
 
@@ -167,6 +166,62 @@ def make_controllers() -> dict:
     }
 
 
+def draw_minimap(current_lat, current_lon, current_yaw, hss_list, target_lat=None, target_lon=None):
+    map_w, map_h = 600, 600
+    map_img = np.ones((map_h, map_w, 3), dtype=np.uint8) * 30
+    
+    cx, cy = map_w // 2, map_h // 2
+    
+    if current_lat is None or current_lon is None:
+        cv2.putText(map_img, "Waiting for GPS...", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        return map_img
+        
+    meter_per_deg_lat = 111320.0
+    meter_per_deg_lon = 111320.0 * math.cos(math.radians(current_lat))
+    pixels_per_meter = 1.5
+    
+    for hss in hss_list:
+        h_lat = hss.get("hssEnlem", 0.0)
+        h_lon = hss.get("hssBoylam", 0.0)
+        h_rad = hss.get("hssYaricap", 0.0)
+        
+        dy_m = (h_lat - current_lat) * meter_per_deg_lat
+        dx_m = (h_lon - current_lon) * meter_per_deg_lon
+        
+        if abs(dx_m) > 10000 or abs(dy_m) > 10000:
+            continue
+            
+        px = int(cx + dx_m * pixels_per_meter)
+        py = int(cy - dy_m * pixels_per_meter)
+        r_px = int(h_rad * pixels_per_meter)
+        
+        cv2.circle(map_img, (px, py), r_px, (0, 0, 255), 2)
+        cv2.drawMarker(map_img, (px, py), (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=1)
+        cv2.putText(map_img, f"HSS R:{int(h_rad)}m", (px + 5, py - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+
+    if target_lat is not None and target_lon is not None:
+        dy_m = (target_lat - current_lat) * meter_per_deg_lat
+        dx_m = (target_lon - current_lon) * meter_per_deg_lon
+        
+        if abs(dx_m) < 10000 and abs(dy_m) < 10000:
+            px = int(cx + dx_m * pixels_per_meter)
+            py = int(cy - dy_m * pixels_per_meter)
+            cv2.circle(map_img, (px, py), 6, (0, 255, 0), -1)
+            cv2.putText(map_img, "Target", (px+10, py+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+    yaw_rad = math.radians(current_yaw if current_yaw else 0.0)
+    dx_drone = math.sin(yaw_rad) * 20
+    dy_drone = -math.cos(yaw_rad) * 20
+    cv2.circle(map_img, (cx, cy), 6, (255, 255, 0), -1)
+    cv2.line(map_img, (cx, cy), (int(cx+dx_drone), int(cy+dy_drone)), (255, 255, 255), 2)
+    cv2.putText(map_img, "Ego", (cx+10, cy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+    cv2.line(map_img, (10, map_h-20), (10 + int(100 * pixels_per_meter), map_h-20), (255, 255, 255), 2)
+    cv2.putText(map_img, "100m", (10, map_h-30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    return map_img
+
+
 def upload_hss_fences(connection, hss_list):
     if not hss_list:
         return
@@ -192,7 +247,7 @@ def upload_hss_fences(connection, hss_list):
 
 def main_loop():
     # LOGIN AND OTHER STUFF
-    token = telemetry.login(BASE_URL, USERNAME, PASSWORD)
+    token = telemetry.login(session, BASE_URL, USERNAME, PASSWORD)
 
     cam = enable_gazebo_camera()
 
@@ -235,6 +290,7 @@ def main_loop():
     smoothed_dx = 0.0
     smoothed_dy = 0.0
     filter_alpha = 0.3
+    desired_roll = 0.0
 
     current_lat = None
     current_lon = None
@@ -248,10 +304,21 @@ def main_loop():
     last_vision_pitch = None
 
     # override = False
-    hss_list = []
+    hss_list = [
+        {"id": 0, "hssEnlem": 38.70312628, "hssBoylam": 27.4587355, "hssYaricap": 50},
+        {"id": 1, "hssEnlem": 38.70242379, "hssBoylam": 27.46087236, "hssYaricap": 100},
+        {"id": 2, "hssEnlem": 38.69932975, "hssBoylam": 27.45782711, "hssYaricap": 50},
+        {"id": 3, "hssEnlem": 38.70369699, "hssBoylam": 27.45884648, "hssYaricap": 100},
+        {"id": 3, "hssEnlem": 38.70285239, "hssBoylam": 27.45887896, "hssYaricap": 100},
+        {"id": 4, "hssEnlem": 38.70197009, "hssBoylam": 27.45766917, "hssYaricap": 100},
+        ]
     last_hss_fetch = 0.0
+    last_telemetry_time = 0.0
+    battery = 100.0
 
     while True:
+        hedef_x = hedef_y = hedef_w = hedef_h = 0
+        GPS_TIME = telemetry.now_clock()
         ## AI RELATED STUFF ##
         ret, frame = cam.read()
         if not ret:
@@ -290,6 +357,11 @@ def main_loop():
 
             # draw the bounding box and confidence string
             obj_cx, obj_cy, dx_norm, dy_norm = mathHelpers.compute_center_deviation(x1, y1, x2, y2, w, h)
+
+            hedef_x = int(obj_cx)
+            hedef_y = int(obj_cy)
+            hedef_w = int(x2 - x1)
+            hedef_h = int(y2 - y1)
 
             smoothed_dx = (filter_alpha * dx_norm) + ((1.0 - filter_alpha) * smoothed_dx)
             smoothed_dy = (filter_alpha * dy_norm) + ((1.0 - filter_alpha) * smoothed_dy)
@@ -368,13 +440,48 @@ def main_loop():
                     cmd.update('alt', TAKEOFF_ALT_TARGET)
 
         cv2.imshow("YOLOv8 Pose UDP Inference", frame)
+        
+        map_img = draw_minimap(current_lat, current_lon, current_yaw, hss_list, target_lat, target_lon)
+        cv2.imshow("Minimap", map_img)
+        
         cv2.waitKey(1)
         ## END OF AI RELATED STUFF ##
+
+        if now - last_telemetry_time >= 0.5:
+            if current_lat is not None and current_lon is not None:
+                kilitlenme = 1 if (last_vision_yaw is not None) else 0
+                try:
+                    enemies = telemetry.send_telemetry(
+                        session=session,
+                        base_url=BASE_URL,
+                        token=token,
+                        team_no=TEAM_NO,
+                        iha_enlem=current_lat,
+                        iha_boylam=current_lon,
+                        iha_irtifa=current_alt,
+                        iha_dikilme=current_pitch,
+                        iha_yonelme=current_yaw,
+                        iha_yatis=current_roll,
+                        iha_hiz=current_spd,
+                        iha_batarya=battery,
+                        iha_otonom=AUTONOMOUS_FLIGHT_STATUS,
+                        gps_saati=GPS_TIME,
+                        iha_kilitlenme=kilitlenme,
+                        hedef_merkez_X=hedef_x,
+                        hedef_merkez_Y=hedef_y,
+                        hedef_genislik=hedef_w,
+                        hedef_yukseklik=hedef_h
+                    )
+                    closest_enemy = mathHelpers.find_closest_target(current_lat, current_lon, enemies, MAX_DISTANCE_BETWEEN_ENEMY)
+                except Exception as e:
+                    print("Telemetry send failed:", e)
+                    enemies = []
+                    closest_enemy = None
+            last_telemetry_time = now
 
 
         t_pitch, t_roll, t_yaw, t_alt, t_speed, running = cmd.snapshot()
         if not running: break
-        print(f"Pitch: {t_pitch}, Roll: {t_roll}, Speed: {t_speed}")
 
         msg = connection.recv_match(type=['ATTITUDE', 'GLOBAL_POSITION_INT', 'VFR_HUD', 'SYS_STATUS'], blocking=False)
         while msg is not None:
@@ -395,28 +502,7 @@ def main_loop():
             elif msg_type == 'SYS_STATUS':
                 battery = msg.battery_remaining
             msg = connection.recv_match(type=['ATTITUDE', 'GLOBAL_POSITION_INT', 'VFR_HUD', 'SYS_STATUS'], blocking=False)
-        try:
-            enemies = telemetry.send_telemetry(
-                session,
-                BASE_URL,
-                token,
-                TEAM_NO,
-                current_lat,
-                current_lon,
-                current_alt,
-                current_pitch,
-                current_roll,
-                current_yaw,
-                current_spd,
-                battery,
-                AUTONOMOUS_FLIGHT_STATUS,
-                GPS_TIME,
-            )
-            closest_enemy = mathHelpers.find_closest_target(current_lat, current_lon, enemies, MAX_DISTANCE_BETWEEN_ENEMY)
-        except Exception as e:
-            print("Telemetry send error:", e)
-            closest_enemy = None
-            
+
 
         if closest_enemy is not None:
             target_lat = closest_enemy["iha_enlem"]
@@ -454,16 +540,19 @@ def main_loop():
             desired_pitch = 0.0
 
         if hss_list and current_lat is not None and current_lon is not None:
-            base_yaw = t_yaw if t_yaw is not None else current_yaw
+            print("-HSS CALC-")
             safe_yaw = mathHelpers.compute_apf_hss(
-                current_lat, current_lon, current_yaw, current_spd, base_yaw, hss_list
+                current_lat, current_lon, current_yaw, current_spd, current_yaw, hss_list
             )
-            if safe_yaw != base_yaw:
+            if safe_yaw != current_yaw:
+                print("HSS AHEAD")
+                cmd.update('yaw', safe_yaw)
+                cmd.update('roll', None)  # Override direct roll commands to steer away
                 t_yaw = safe_yaw
-                t_roll = None  # Override direct roll commands to steer away
+                t_roll = None
 
         # roll calc dependent on yaw
-        elif t_yaw is not None:
+        if t_yaw is not None:
             low, high = AXIS_BOUNDS['roll']
             heading_error = mathHelpers.wrap_angle_deg(t_yaw - current_yaw)
             desired_roll = mathHelpers.clamp(ctrls['heading'].compute(heading_error, -current_yaw_rate, dt), low, high)
