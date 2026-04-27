@@ -1,4 +1,15 @@
 import requests
+import time
+from datetime import datetime, timedelta
+
+def now_clock():
+    now = datetime.utcnow()
+    return {
+        "saat": now.hour,
+        "dakika": now.minute,
+        "saniye": now.second,
+        "milisaniye": int(now.microsecond / 1000)
+    }
 
 def login(session: requests.Session, base_url: str, username: str, password: str) -> str:
     url = f"{base_url}/api/giris"
@@ -56,7 +67,7 @@ def send_telemetry(
     iha_batarya: float,
     iha_otonom: int,
     gps_saati: dict,
-    iha_kilitlenme: int = 0,
+    iha_kilitlenme: int = None,
     hedef_merkez_X: int = None,
     hedef_merkez_Y: int = None,
     hedef_genislik: int = None,
@@ -77,7 +88,7 @@ def send_telemetry(
         "iha_yonelme": iha_yonelme,
         "iha_yatis": iha_yatis,
         "iha_hiz": iha_hiz,
-        "iha_batarya": iha_batarya,
+        "iha_batarya": 1,
         "iha_otonom": iha_otonom,
         "iha_kilitlenme": iha_kilitlenme,
         "hedef_merkez_X": hedef_merkez_X,
