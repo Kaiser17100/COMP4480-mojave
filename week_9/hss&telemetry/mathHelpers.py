@@ -64,7 +64,7 @@ def find_closest_target(current_lat, current_lon, targets, max_distance):
             closest_distance = distance
             closest_target = target
 
-    if closest_distance > max_distance:
+    if closest_distance <= max_distance:
         return closest_target
 
     return None
