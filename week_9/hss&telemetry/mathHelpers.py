@@ -70,7 +70,7 @@ def find_closest_target(current_lat, current_lon, targets, max_distance):
     return None
 
 
-def compute_apf_hss(current_lat, current_lon, current_yaw, current_spd, desired_yaw, hss_list, lookahead_time=2.0, safety_margin=50.0, eta=50000.0, k_att=1.0):
+def compute_apf_hss(current_lat, current_lon, current_yaw, current_spd, desired_yaw, hss_list, lookahead_time=2.0, safety_margin=50.0, eta=75000.0, k_att=1.0):
     import math
     
     # Drone's local future position based on current velocity
@@ -102,16 +102,23 @@ def compute_apf_hss(current_lat, current_lon, current_yaw, current_spd, desired_
         dy = p_future_y - h_y
         d_future = math.sqrt(dx**2 + dy**2)
         
-        # Influence radius
-        d0 = hss_radius + safety_margin
+        # Distance to the boundary of the HSS area
+        d_obs = d_future - hss_radius
         
-        if d_future < d0 and d_future > 0.1:
-            # Calculate repulsive force magnitude
-            f_rep = eta * (1.0 / d_future - 1.0 / d0) * (1.0 / (d_future**2))
+        # If within the safety margin (influence radius of the obstacle)
+        if d_obs < safety_margin:
+            d_obs_clamped = max(d_obs, 0.1)  # prevent singularity if inside or exactly on the boundary
             
-            # Direction from HSS to future position (pushing away)
-            dir_x = dx / d_future
-            dir_y = dy / d_future
+            # Calculate repulsive force magnitude based on distance to boundary
+            f_rep = eta * (1.0 / d_obs_clamped - 1.0 / safety_margin) * (1.0 / (d_obs_clamped**2))
+            
+            # Direction from HSS center to future position (pushing radially away)
+            if d_future > 0.001:
+                dir_x = dx / d_future
+                dir_y = dy / d_future
+            else:
+                dir_x = 1.0
+                dir_y = 0.0
             
             total_rep_x += f_rep * dir_x
             total_rep_y += f_rep * dir_y
