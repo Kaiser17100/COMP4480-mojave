@@ -19,18 +19,18 @@ import telemetry
 import requests
 import threading
 
-CURRENT_MISSION_MODE = "enemy"
+CURRENT_MISSION_MODE = "normal"
 
 def input_thread_func():
     global CURRENT_MISSION_MODE
     while True:
         try:
-            val = input("Enter mission mode ('enemy' or 'qr'): ").strip().lower()
-            if val in ["enemy", "qr"]:
+            val = input("Enter mission mode ('enemy', 'qr' or 'normal'): ").strip().lower()
+            if val in ["enemy", "qr", "normal"]:
                 CURRENT_MISSION_MODE = val
                 print(f"[MISSION] Mode switched to: {CURRENT_MISSION_MODE}")
             else:
-                print(f"[MISSION] Invalid mode '{val}'. Use 'enemy' or 'qr'.")
+                print(f"[MISSION] Invalid mode '{val}'. Use 'enemy', 'qr' or 'normal'.")
         except:
             break
 
@@ -40,6 +40,14 @@ PASSWORD = "4"
 TEAM_NO = 4
 
 ## GLOBAL VARIABLES ##
+# 4 coordinates for quadrilateral boundary
+FLIGHT_BOUNDARIES = [
+    (38.70463973, 27.45086697),
+    (38.70462329, 27.45996806),
+    (38.69837561, 27.45758745),
+    (38.69842494, 27.44964507),
+]
+
 AXIS_BOUNDS = {
     'pitch': (-30.0, 30.0),
     'roll': (-45.0, 45.0),
@@ -153,6 +161,39 @@ def enable_gazebo_camera():
 
 
 ## CONTROLLER SETUP & MAIN LOOP
+
+def generate_boundary_hss(boundaries, step_m=20.0, radius_m=20.0):
+    boundary_hss = []
+    if len(boundaries) < 3:
+        return boundary_hss
+        
+    for i in range(len(boundaries)):
+        lat1, lon1 = boundaries[i]
+        lat2, lon2 = boundaries[(i + 1) % len(boundaries)]
+        
+        meter_per_deg_lat = 111320.0
+        meter_per_deg_lon = 111320.0 * math.cos(math.radians((lat1+lat2)/2.0))
+        
+        dy = (lat2 - lat1) * meter_per_deg_lat
+        dx = (lon2 - lon1) * meter_per_deg_lon
+        
+        dist = math.sqrt(dx**2 + dy**2)
+        steps = int(dist / step_m)
+        if steps == 0:
+            steps = 1
+            
+        for j in range(steps):
+            frac = j / float(steps)
+            plat = lat1 + (lat2 - lat1) * frac
+            plon = lon1 + (lon2 - lon1) * frac
+            boundary_hss.append({
+                "hssEnlem": plat,
+                "hssBoylam": plon,
+                "hssYaricap": radius_m
+            })
+            
+    return boundary_hss
+
 
 # these are product of husein
 def make_controllers() -> dict:
@@ -326,6 +367,7 @@ def main_loop():
 
     # override = False
     hss_list = []
+    boundary_hss_list = generate_boundary_hss(FLIGHT_BOUNDARIES, step_m=20.0, radius_m=20.0)
     last_hss_fetch = 0.0
     last_telemetry_time = 0.0
     battery = 100.0
@@ -496,10 +538,11 @@ def main_loop():
                     cmd.update('alt', TAKEOFF_ALT_TARGET)
 
         cv2.imshow("YOLOv8 Pose UDP Inference", frame)
+        combined_hss = hss_list + boundary_hss_list
         if closest_enemy is not None:
-            map_img = draw_minimap(current_lat, current_lon, current_yaw, hss_list, closest_enemy['iha_enlem'], closest_enemy['iha_boylam'], qr_enlem, qr_boylam)
+            map_img = draw_minimap(current_lat, current_lon, current_yaw, combined_hss, closest_enemy['iha_enlem'], closest_enemy['iha_boylam'], qr_enlem, qr_boylam)
         else:
-            map_img = draw_minimap(current_lat, current_lon, current_yaw, hss_list, None, None, qr_enlem, qr_boylam)
+            map_img = draw_minimap(current_lat, current_lon, current_yaw, combined_hss, None, None, qr_enlem, qr_boylam)
         cv2.imshow("Minimap", map_img)
         
         cv2.waitKey(1)
@@ -666,12 +709,13 @@ def main_loop():
         else:
             desired_pitch = 0.0
 
-        if hss_list and current_lat is not None and current_lon is not None:
+        combined_hss = hss_list + boundary_hss_list
+        if combined_hss and current_lat is not None and current_lon is not None:
             safe_yaw = mathHelpers.compute_apf_hss(
-                current_lat, current_lon, current_yaw, current_spd, current_yaw, hss_list
+                current_lat, current_lon, current_yaw, current_spd, current_yaw, combined_hss
             )
             if safe_yaw != current_yaw:
-                print("HSS AHEAD")
+                print("OBSTACLE / BOUNDARY AHEAD")
                 cmd.update('yaw', safe_yaw)
                 cmd.update('roll', None)  # Override direct roll commands to steer away
                 t_yaw = safe_yaw
