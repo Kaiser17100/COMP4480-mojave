@@ -15,32 +15,16 @@ import math
 import cv2
 import numpy as np
 import commandState as CS
-import telemetry
 import requests
 import threading
 
 CURRENT_MISSION_MODE = "normal"
-
-def input_thread_func():
-    global CURRENT_MISSION_MODE
-    while True:
-        try:
-            val = input("Enter mission mode ('enemy', 'qr' or 'normal'): ").strip().lower()
-            if val in ["enemy", "qr", "normal"]:
-                CURRENT_MISSION_MODE = val
-                print(f"[MISSION] Mode switched to: {CURRENT_MISSION_MODE}")
-            else:
-                print(f"[MISSION] Invalid mode '{val}'. Use 'enemy', 'qr' or 'normal'.")
-        except:
-            break
-
 BASE_URL = "http://127.0.0.1:10001"
 USERNAME = "4"
 PASSWORD = "4"
 TEAM_NO = 4
 
 ## GLOBAL VARIABLES ##
-# 4 coordinates for quadrilateral boundary
 FLIGHT_BOUNDARIES = [
     (38.70463973, 27.45086697),
     (38.70462329, 27.45996806),
@@ -65,19 +49,13 @@ DT_MIN = 0.01
 PREV_MEAS_RATE_CONST = 0.75
 CONF = 0.25
 IMG_SIZE = 640
-AXIS_TURN_STRENGHT = 0.8
 FOV_X_DEG = 80.0
 FOV_Y_DEG = 60.0
 PREARM_CONST = mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK
 MAX_DISTANCE_BETWEEN_ENEMY = 30.0
 AUTONOMOUS_FLIGHT_STATUS = 1
 session = requests.Session()
-gps_time = {        
-        "saat": 0,
-        "dakika": 0,
-        "saniye": 0,
-        "milisaniye": 0
-    }
+
 
 ## HELPERS ##
 
@@ -92,6 +70,20 @@ connection.mav.request_data_stream_send(
     20,
     1
 )
+
+def input_thread_func():
+    global CURRENT_MISSION_MODE
+    while True:
+        try:
+            val = input("Enter mission mode ('enemy', 'qr' or 'normal'): ").strip().lower()
+            if val in ["enemy", "qr", "normal"]:
+                CURRENT_MISSION_MODE = val
+                print(f"[MISSION] Mode switched to: {CURRENT_MISSION_MODE}")
+            else:
+                print(f"[MISSION] Invalid mode '{val}'. Use 'enemy', 'qr' or 'normal'.")
+        except:
+            break
+
 
 def wait_for_prearm():
     print("Waiting for pre-arm...")
@@ -160,8 +152,6 @@ def enable_gazebo_camera():
     return cap
 
 
-## CONTROLLER SETUP & MAIN LOOP
-
 def generate_boundary_hss(boundaries, step_m=20.0, radius_m=20.0):
     boundary_hss = []
     if len(boundaries) < 3:
@@ -193,39 +183,6 @@ def generate_boundary_hss(boundaries, step_m=20.0, radius_m=20.0):
             })
             
     return boundary_hss
-
-
-# these are product of husein
-def make_controllers() -> dict:
-    return {
-        'pitch_att': controllers.HybridController(
-            pid_ctrl=controllers.PIDController(kp=0.45, ki=0.10, kd=0.08, integral_limit=20.0, output_limit=15.0,
-                                               integral_zone=18.0, rate_filter_tau=0.10),
-            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=25.0, rate_range=40.0),
-        ),
-        'roll_att': controllers.HybridController(
-            pid_ctrl=controllers.PIDController(kp=0.50, ki=0.10, kd=0.08, integral_limit=25.0, output_limit=18.0,
-                                               integral_zone=20.0, rate_filter_tau=0.10),
-            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=35.0, rate_range=50.0),
-        ),
-        'heading': controllers.HybridController(
-            pid_ctrl=controllers.PIDController(kp=0.40, ki=0.035, kd=0.05, integral_limit=80.0, output_limit=35.0,
-                                               integral_zone=90.0, rate_filter_tau=0.12),
-            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=120.0, rate_range=40.0),
-        ),
-        'altitude': controllers.HybridController(
-            pid_ctrl=controllers.PIDController(kp=0.65, ki=0.08, kd=0.04, integral_limit=60.0, output_limit=18.0,
-                                               integral_zone=35.0, rate_filter_tau=0.18),
-            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=40.0, rate_range=8.0),
-        ),
-        'speed': controllers.HybridController(
-            pid_ctrl=controllers.PIDController(kp=0.07, ki=0.03, kd=0.01, integral_limit=10.0, output_limit=0.35,
-                                               integral_zone=12.0, rate_filter_tau=0.20),
-            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=12.0, rate_range=6.0),
-        ),
-        'vision_pan': controllers.PIDController(kp=35.0, ki=5.0, kd=10.0, output_limit=40.0),
-        'vision_tilt': controllers.PIDController(kp=20.0, ki=2.0, kd=5.0, output_limit=25.0),
-    }
 
 
 def draw_minimap(current_lat, current_lon, current_yaw, hss_list, target_lat=None, target_lon=None, qr_lat=None, qr_lon=None):
@@ -286,12 +243,47 @@ def draw_minimap(current_lat, current_lon, current_yaw, hss_list, target_lat=Non
     dy_drone = -math.cos(yaw_rad) * 20
     cv2.circle(map_img, (cx, cy), 6, (255, 255, 0), -1)
     cv2.line(map_img, (cx, cy), (int(cx+dx_drone), int(cy+dy_drone)), (255, 255, 255), 2)
-    cv2.putText(map_img, "Ego", (cx+10, cy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+    cv2.putText(map_img, "US", (cx+10, cy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
     cv2.line(map_img, (10, map_h-20), (10 + int(100 * pixels_per_meter), map_h-20), (255, 255, 255), 2)
     cv2.putText(map_img, "100m", (10, map_h-30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
     return map_img
+
+
+## CONTROLLER SETUP & MAIN LOOP
+
+# these are product of husein
+def make_controllers() -> dict:
+    return {
+        'pitch_att': controllers.HybridController(
+            pid_ctrl=controllers.PIDController(kp=0.45, ki=0.10, kd=0.08, integral_limit=20.0, output_limit=15.0,
+                                               integral_zone=18.0, rate_filter_tau=0.10),
+            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=25.0, rate_range=40.0),
+        ),
+        'roll_att': controllers.HybridController(
+            pid_ctrl=controllers.PIDController(kp=0.50, ki=0.10, kd=0.08, integral_limit=25.0, output_limit=18.0,
+                                               integral_zone=20.0, rate_filter_tau=0.10),
+            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=35.0, rate_range=50.0),
+        ),
+        'heading': controllers.HybridController(
+            pid_ctrl=controllers.PIDController(kp=0.40, ki=0.035, kd=0.05, integral_limit=80.0, output_limit=35.0,
+                                               integral_zone=90.0, rate_filter_tau=0.12),
+            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=120.0, rate_range=40.0),
+        ),
+        'altitude': controllers.HybridController(
+            pid_ctrl=controllers.PIDController(kp=0.65, ki=0.08, kd=0.04, integral_limit=60.0, output_limit=18.0,
+                                               integral_zone=35.0, rate_filter_tau=0.18),
+            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=40.0, rate_range=8.0),
+        ),
+        'speed': controllers.HybridController(
+            pid_ctrl=controllers.PIDController(kp=0.07, ki=0.03, kd=0.01, integral_limit=10.0, output_limit=0.35,
+                                               integral_zone=12.0, rate_filter_tau=0.20),
+            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=12.0, rate_range=6.0),
+        ),
+        'vision_pan': controllers.PIDController(kp=35.0, ki=5.0, kd=10.0, output_limit=40.0),
+        'vision_tilt': controllers.PIDController(kp=20.0, ki=2.0, kd=5.0, output_limit=25.0),
+    }
 
 
 def main_loop():
