@@ -120,8 +120,13 @@ def compute_apf_hss(current_lat, current_lon, current_yaw, current_spd, desired_
                 dir_x = 1.0
                 dir_y = 0.0
             
-            total_rep_x += f_rep * dir_x
-            total_rep_y += f_rep * dir_y
+            # Vortex/Tangential field to prevent getting stuck in straight lines (local minima)
+            # 90 degrees clockwise rotation of the radial vector
+            tan_x = dir_y
+            tan_y = -dir_x
+            
+            total_rep_x += f_rep * (dir_x + 0.8 * tan_x)
+            total_rep_y += f_rep * (dir_y + 0.8 * tan_y)
 
     if total_rep_x == 0 and total_rep_y == 0:
         return desired_yaw # No repulsive forces acting
