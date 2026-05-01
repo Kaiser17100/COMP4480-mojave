@@ -1,6 +1,6 @@
 # COMP 4480 Intelligent & Autonomous Systems
 ## Description:
-This is project for COMP 4480 class, in this class our objective is to create a program that is ready for ArduPilot Simulation of Teknofest Fighter UAV Competition
+This is project for COMP 4480 class, in this class our objective is to create a program that is ready for Gazebo Simulation of Teknofest Fighter UAV Competition
 ## Current Abilities of the Project:
 - PID Controller
 - Fuzzy Controller
