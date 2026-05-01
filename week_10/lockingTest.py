@@ -33,7 +33,7 @@ FLIGHT_BOUNDARIES = [
 ]
 
 AXIS_BOUNDS = {
-    'pitch': (-30.0, 30.0),
+    'pitch': (-35.0, 35.0),
     'roll': (-45.0, 45.0),
     'yaw': (-180.0, 180.0),
     'alt': (50.0, 300.0),
@@ -618,15 +618,14 @@ def main_loop():
                     target_lat = qr_enlem
                     target_lon = qr_boylam
                     target_alt = 110.0
-                    if dist_to_qr < 100.0 and current_alt > 90.0:
+                    if dist_to_qr < 180.0 and current_alt > 90.0:
                         kamikaze_start_time = telemetry.now_clock()
                         qr_mission_state = "DIVE"
                         print("[QR MISSION] Close to QR! Initiating DIVE!")
                 
                 elif qr_mission_state == "DIVE":
                     # QR Okuma ve Koordinat İsteme
-                    t_pitch = -65.0
-                    t_roll = 0.0
+                    t_pitch = -35.0
                     t_alt = None
                     qr_vision_yaw = None
                     qr_data, bbox, _ = qr_detector.detectAndDecode(frame)
@@ -642,6 +641,7 @@ def main_loop():
                         cv2.polylines(frame, [pts], True, (255, 0, 255), 2)
 
                     if qr_data:
+                        print("[QR MISSION] QR detected!")
                         try:
                             if qr_resp and not sended_qr:
                                 kamikaze_zaman = telemetry.now_clock()
@@ -653,6 +653,8 @@ def main_loop():
                             print(f"[QR] Koordinat sunucudan alınamadı: {e}")
                     if qr_vision_yaw is not None:
                         t_yaw = qr_vision_yaw
+                    elif current_lat is not None and current_lon is not None and qr_enlem is not None and qr_boylam is not None:
+                        t_yaw = mathHelpers.get_bearing(current_lat, current_lon, qr_enlem, qr_boylam)
                     
                     if current_alt < 40.0:
                         qr_mission_state = "PULLOUT"
