@@ -152,7 +152,7 @@ def enable_gazebo_camera():
     return cap
 
 
-def generate_boundary_hss(boundaries, step_m=20.0, radius_m=20.0):
+def generate_boundary_hss(boundaries, step_m=20.0, radius_m=10.0):
     boundary_hss = []
     if len(boundaries) < 3:
         return boundary_hss
@@ -347,6 +347,7 @@ def main_loop():
     qr_detector = cv2.QRCodeDetector()
     qr_mission_state = "APPROACH"
     qr_data = None
+    kamikaze_start_time = {}
     
     # Kilitlenme (Lock) variables
     is_locked_on = False
@@ -356,6 +357,7 @@ def main_loop():
 
     last_vision_yaw = None
     last_vision_pitch = None
+    sended_qr = False
 
     # override = False
     hss_list = []
@@ -386,6 +388,7 @@ def main_loop():
         if now - last_hss_fetch >= 60.0:
             try:
                 hss_data = telemetry.get_hss(session, BASE_URL, token)
+                print(hss_data)
                 if hss_data:
                     hss_list = hss_data
             except Exception as e:
@@ -489,16 +492,17 @@ def main_loop():
                 desired_speed = mathHelpers.clamp(20.0 + speed_correction, AXIS_BOUNDS['speed'][0], AXIS_BOUNDS['speed'][1])
                 cmd.update('speed', desired_speed)
 
-        elif is_locked_on:
-            lock_duration = now - lock_start_time
-            is_locked_on = False
-            print(f"[LOCK] Hedef kaybedildi. Kilitlenme koptu. Süre: {lock_duration:.1f}s")
-            if lock_duration >= LOCK_REQUIRED_TIME:
-                print(f"[LOCK] {LOCK_REQUIRED_TIME} saniyeyi aştığı için BAŞARILI kilitlenme sayıldı! API'ye gönderiliyor...")
-                try:
-                    telemetry.send_lock(session, BASE_URL, token, AUTONOMOUS_FLIGHT_STATUS, telemetry.now_clock())
-                except Exception as e:
-                    print("[LOCK] API Hatası:", e)
+        else:
+            if is_locked_on:
+                lock_duration = now - lock_start_time
+                is_locked_on = False
+                print(f"[LOCK] Hedef kaybedildi. Kilitlenme koptu. Süre: {lock_duration:.1f}s")
+                if lock_duration >= LOCK_REQUIRED_TIME:
+                    print(f"[LOCK] {LOCK_REQUIRED_TIME} saniyeyi aştığı için BAŞARILI kilitlenme sayıldı! API'ye gönderiliyor...")
+                    try:
+                        telemetry.send_lock(session, BASE_URL, token, AUTONOMOUS_FLIGHT_STATUS, telemetry.now_clock())
+                    except Exception as e:
+                        print("[LOCK] API Hatası:", e)
 
             # Acknowledgement and memory system
             if last_vision_yaw is not None and last_vision_pitch is not None:
@@ -615,11 +619,15 @@ def main_loop():
                     target_lon = qr_boylam
                     target_alt = 110.0
                     if dist_to_qr < 100.0 and current_alt > 90.0:
+                        kamikaze_start_time = telemetry.now_clock()
                         qr_mission_state = "DIVE"
                         print("[QR MISSION] Close to QR! Initiating DIVE!")
                 
                 elif qr_mission_state == "DIVE":
                     # QR Okuma ve Koordinat İsteme
+                    t_pitch = -65.0
+                    t_roll = 0.0
+                    t_alt = None
                     qr_vision_yaw = None
                     qr_data, bbox, _ = qr_detector.detectAndDecode(frame)
                     if bbox is not None:
@@ -634,19 +642,15 @@ def main_loop():
                         cv2.polylines(frame, [pts], True, (255, 0, 255), 2)
 
                     if qr_data:
-                        print(f"[QR] Kameradan QR Okundu: {qr_data}")
                         try:
-                            if qr_resp:
+                            if qr_resp and not sended_qr:
                                 kamikaze_zaman = telemetry.now_clock()
-                                telemetry.send_kamikaze(session, BASE_URL, token, qr_data, kamikaze_zaman, kamikaze_zaman)
+                                telemetry.send_kamikaze(session, BASE_URL, token, TEAM_NO, qr_data, kamikaze_start_time, kamikaze_zaman)
+                                sended_qr = True
                                 print("[QR MISSION] QR read successfully! Returning to normal flight.")
-                                CURRENT_MISSION_MODE = "enemy"
-                                qr_mission_state = "APPROACH"
+                                qr_mission_state = "PULLOUT"
                         except Exception as e:
                             print(f"[QR] Koordinat sunucudan alınamadı: {e}")
-                    t_pitch = -25.0
-                    t_roll = 0.0
-                    t_alt = None
                     if qr_vision_yaw is not None:
                         t_yaw = qr_vision_yaw
                     
@@ -661,9 +665,14 @@ def main_loop():
                     target_alt = TAKEOFF_ALT_TARGET
                     print("[QR MISSION] Returning to normal flight.")
                     qr_mission_state = "APPROACH"
+                    CURRENT_MISSION_MODE = "normal"
             else:
                 target_lat = None
                 target_lon = None
+
+        if CURRENT_MISSION_MODE == "normal":
+            target_lat = None
+            target_lon = None
 
         ## locating the enemy
         elif closest_enemy is not None and CURRENT_MISSION_MODE == "enemy":
