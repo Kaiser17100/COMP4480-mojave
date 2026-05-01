@@ -1,3 +1,5 @@
+import math
+
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
@@ -143,3 +145,125 @@ def compute_apf_hss(current_lat, current_lon, current_yaw, current_spd, desired_
     
     new_yaw = math.degrees(math.atan2(total_x, total_y))
     return (new_yaw + 360.0) % 360.0
+
+
+def enforce_flight_boundaries(current_lat, current_lon, current_yaw, current_spd, desired_yaw, boundaries, lookahead_time=2.0, safety_margin=50.0, eta=75000.0, k_att=1.0):
+    if len(boundaries) < 3:
+        return desired_yaw
+        
+    origin_lat = boundaries[0][0]
+    origin_lon = boundaries[0][1]
+    
+    meter_per_deg_lat = 111320.0
+    meter_per_deg_lon = 111320.0 * math.cos(math.radians(origin_lat))
+    
+    def latlon_to_xy(lat, lon):
+        x = (lon - origin_lon) * meter_per_deg_lon
+        y = (lat - origin_lat) * meter_per_deg_lat
+        return x, y
+        
+    p_x, p_y = latlon_to_xy(current_lat, current_lon)
+    
+    # Build polygon in XY
+    polygon = []
+    for lat, lon in boundaries:
+        polygon.append(latlon_to_xy(lat, lon))
+        
+    # Ray casting to check if drone is inside
+    inside = False
+    n = len(polygon)
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        intersect = ((yi > p_y) != (yj > p_y)) and (p_x < (xj - xi) * (p_y - yi) / (yj - yi) + xi)
+        if intersect:
+            inside = not inside
+        j = i
+        
+    # Calculate centroid of polygon
+    cx = sum(p[0] for p in polygon) / n
+    cy = sum(p[1] for p in polygon) / n
+    
+    if not inside:
+        # OUT OF BOUNDS: override everything and point directly to the center
+        return (math.degrees(math.atan2(cx - p_x, cy - p_y)) + 360.0) % 360.0
+        
+    # INSIDE: check if we are approaching a wall
+    yaw_rad = math.radians(current_yaw)
+    v_x = current_spd * math.sin(yaw_rad)
+    v_y = current_spd * math.cos(yaw_rad)
+    
+    p_future_x = p_x + v_x * lookahead_time
+    p_future_y = p_y + v_y * lookahead_time
+    
+    desired_yaw_rad = math.radians(desired_yaw)
+    vec_x = math.sin(desired_yaw_rad)
+    vec_y = math.cos(desired_yaw_rad)
+    
+    repulsion_applied = False
+    
+    for i in range(n):
+        ax, ay = polygon[i]
+        bx, by = polygon[(i + 1) % n]
+        
+        l2 = (bx - ax)**2 + (by - ay)**2
+        if l2 == 0:
+            continue
+            
+        t = max(0.0, min(1.0, ((p_future_x - ax) * (bx - ax) + (p_future_y - ay) * (by - ay)) / l2))
+        proj_x = ax + t * (bx - ax)
+        proj_y = ay + t * (by - ay)
+        
+        dx = p_future_x - proj_x
+        dy = p_future_y - proj_y
+        d_obs = math.sqrt(dx**2 + dy**2)
+        
+        if d_obs < safety_margin:
+            # We are close. Calculate inward normal.
+            nx = -(by - ay)
+            ny = (bx - ax)
+            nl = math.sqrt(nx**2 + ny**2)
+            if nl > 0:
+                nx /= nl
+                ny /= nl
+                
+            # Ensure it points towards centroid (inward)
+            mx = (ax + bx) / 2.0
+            my = (ay + by) / 2.0
+            if (nx * (cx - mx) + ny * (cy - my)) < 0:
+                nx = -nx
+                ny = -ny
+                
+            # Strength increases as we get closer
+            d_obs_clamped = max(d_obs, 0.1)
+            strength = (safety_margin / d_obs_clamped) - 1.0
+            
+            # Tangent logic: push towards the middle of the wall to avoid corner traps
+            tx = (bx - ax) / math.sqrt(l2)
+            ty = (by - ay) / math.sqrt(l2)
+            
+            dot_mid = tx * (mx - proj_x) + ty * (my - proj_y)
+            
+            if abs(dot_mid) > 0.1:
+                if dot_mid < 0:
+                    tx = -tx
+                    ty = -ty
+            else:
+                if (v_x * tx + v_y * ty) < 0:
+                    tx = -tx
+                    ty = -ty
+                
+            # Add inward push + a slight tangent to turn towards the safest area
+            push_x = nx + 0.6 * tx
+            push_y = ny + 0.6 * ty
+            
+            vec_x += push_x * strength * 2.0
+            vec_y += push_y * strength * 2.0
+            repulsion_applied = True
+            
+    if repulsion_applied:
+        new_yaw = math.degrees(math.atan2(vec_x, vec_y))
+        return (new_yaw + 360.0) % 360.0
+        
+    return desired_yaw
