@@ -152,40 +152,10 @@ def enable_gazebo_camera():
     return cap
 
 
-def generate_boundary_hss(boundaries, step_m=20.0, radius_m=10.0):
-    boundary_hss = []
-    if len(boundaries) < 3:
-        return boundary_hss
-        
-    for i in range(len(boundaries)):
-        lat1, lon1 = boundaries[i]
-        lat2, lon2 = boundaries[(i + 1) % len(boundaries)]
-        
-        meter_per_deg_lat = 111320.0
-        meter_per_deg_lon = 111320.0 * math.cos(math.radians((lat1+lat2)/2.0))
-        
-        dy = (lat2 - lat1) * meter_per_deg_lat
-        dx = (lon2 - lon1) * meter_per_deg_lon
-        
-        dist = math.sqrt(dx**2 + dy**2)
-        steps = int(dist / step_m)
-        if steps == 0:
-            steps = 1
-            
-        for j in range(steps):
-            frac = j / float(steps)
-            plat = lat1 + (lat2 - lat1) * frac
-            plon = lon1 + (lon2 - lon1) * frac
-            boundary_hss.append({
-                "hssEnlem": plat,
-                "hssBoylam": plon,
-                "hssYaricap": radius_m
-            })
-            
-    return boundary_hss
 
 
-def draw_minimap(current_lat, current_lon, current_yaw, hss_list, target_lat=None, target_lon=None, qr_lat=None, qr_lon=None):
+
+def draw_minimap(current_lat, current_lon, current_yaw, hss_list, flight_boundaries, target_lat=None, target_lon=None, qr_lat=None, qr_lon=None):
     map_w, map_h = 600, 600
     map_img = np.ones((map_h, map_w, 3), dtype=np.uint8) * 30
     
@@ -199,6 +169,25 @@ def draw_minimap(current_lat, current_lon, current_yaw, hss_list, target_lat=Non
     meter_per_deg_lon = 111320.0 * math.cos(math.radians(current_lat))
     pixels_per_meter = 1.5
     
+    if flight_boundaries and len(flight_boundaries) >= 3:
+        for i in range(len(flight_boundaries)):
+            lat1, lon1 = flight_boundaries[i]
+            lat2, lon2 = flight_boundaries[(i + 1) % len(flight_boundaries)]
+            
+            dy_m1 = (lat1 - current_lat) * meter_per_deg_lat
+            dx_m1 = (lon1 - current_lon) * meter_per_deg_lon
+            
+            dy_m2 = (lat2 - current_lat) * meter_per_deg_lat
+            dx_m2 = (lon2 - current_lon) * meter_per_deg_lon
+            
+            px1 = int(cx + dx_m1 * pixels_per_meter)
+            py1 = int(cy - dy_m1 * pixels_per_meter)
+            
+            px2 = int(cx + dx_m2 * pixels_per_meter)
+            py2 = int(cy - dy_m2 * pixels_per_meter)
+            
+            cv2.line(map_img, (px1, py1), (px2, py2), (0, 165, 255), 2)
+            
     for hss in hss_list:
         h_lat = hss.get("hssEnlem", 0.0)
         h_lon = hss.get("hssBoylam", 0.0)
@@ -361,7 +350,6 @@ def main_loop():
 
     # override = False
     hss_list = []
-    boundary_hss_list = generate_boundary_hss(FLIGHT_BOUNDARIES, step_m=20.0, radius_m=20.0)
     last_hss_fetch = 0.0
     last_telemetry_time = 0.0
     battery = 100.0
@@ -534,11 +522,10 @@ def main_loop():
                     cmd.update('alt', TAKEOFF_ALT_TARGET)
 
         cv2.imshow("YOLOv8 Pose UDP Inference", frame)
-        combined_hss = hss_list + boundary_hss_list
         if closest_enemy is not None:
-            map_img = draw_minimap(current_lat, current_lon, current_yaw, combined_hss, closest_enemy['iha_enlem'], closest_enemy['iha_boylam'], qr_enlem, qr_boylam)
+            map_img = draw_minimap(current_lat, current_lon, current_yaw, hss_list, FLIGHT_BOUNDARIES, closest_enemy['iha_enlem'], closest_enemy['iha_boylam'], qr_enlem, qr_boylam)
         else:
-            map_img = draw_minimap(current_lat, current_lon, current_yaw, combined_hss, None, None, qr_enlem, qr_boylam)
+            map_img = draw_minimap(current_lat, current_lon, current_yaw, hss_list, FLIGHT_BOUNDARIES, None, None, qr_enlem, qr_boylam)
         cv2.imshow("Minimap", map_img)
         
         cv2.waitKey(1)
@@ -628,7 +615,10 @@ def main_loop():
                     t_pitch = -35.0
                     t_alt = None
                     qr_vision_yaw = None
-                    qr_data, bbox, _ = qr_detector.detectAndDecode(frame)
+                    try:
+                        qr_data, bbox, _ = qr_detector.detectAndDecode(frame)
+                    except cv2.error:
+                        qr_data, bbox = None, None
                     if bbox is not None:
                         pts = bbox[0]
                         qr_cx = sum(p[0] for p in pts) / 4.0
@@ -650,11 +640,9 @@ def main_loop():
                                 print("[QR MISSION] QR read successfully! Returning to normal flight.")
                                 qr_mission_state = "PULLOUT"
                         except Exception as e:
-                            print(f"[QR] Koordinat sunucudan alınamadı: {e}")
+                            print(f"[QR] QR could not be sent: {e}")
                     if qr_vision_yaw is not None:
                         t_yaw = qr_vision_yaw
-                    elif current_lat is not None and current_lon is not None and qr_enlem is not None and qr_boylam is not None:
-                        t_yaw = mathHelpers.get_bearing(current_lat, current_lon, qr_enlem, qr_boylam)
                     
                     if current_alt < 40.0:
                         qr_mission_state = "PULLOUT"
@@ -712,11 +700,16 @@ def main_loop():
         else:
             desired_pitch = 0.0
 
-        combined_hss = hss_list + boundary_hss_list
-        if combined_hss and current_lat is not None and current_lon is not None:
-            safe_yaw = mathHelpers.compute_apf_hss(
-                current_lat, current_lon, current_yaw, current_spd, current_yaw, combined_hss
-            )
+        if current_lat is not None and current_lon is not None:
+            safe_yaw = current_yaw
+            if hss_list:
+                safe_yaw = mathHelpers.compute_apf_hss(
+                    current_lat, current_lon, safe_yaw, current_spd, safe_yaw, hss_list
+                )
+            if FLIGHT_BOUNDARIES:
+                safe_yaw = mathHelpers.enforce_flight_boundaries(
+                    current_lat, current_lon, safe_yaw, current_spd, safe_yaw, FLIGHT_BOUNDARIES
+                )
             if safe_yaw != current_yaw:
                 print("OBSTACLE / BOUNDARY AHEAD")
                 cmd.update('yaw', safe_yaw)
