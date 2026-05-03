@@ -266,4 +266,8 @@ def enforce_flight_boundaries(current_lat, current_lon, current_yaw, current_spd
         new_yaw = math.degrees(math.atan2(vec_x, vec_y))
         return (new_yaw + 360.0) % 360.0
         
+<<<<<<< HEAD
     return desired_yaw
+=======
+    return desired_yaw
+>>>>>>> e9e2d76 (latest version of the local code)
