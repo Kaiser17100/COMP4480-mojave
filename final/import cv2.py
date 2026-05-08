@@ -9,13 +9,22 @@ import os
 # =========================
 # RTP/H264 UDP GİRİŞ
 # =========================
-UDP_IN_PORT = 5604
+UDP_IN_PORT = int(os.getenv("IHA_CAMERA_IN_PORT", "5604"))
 
 # =========================
 # ÇIKIŞ JPEG UDP
 # =========================
-UDP_OUT_IP = "127.0.0.1"
-UDP_OUT_PORT = 5426
+TEAM_NO = int(os.getenv("IHA_TEAM_NO", "4"))
+STREAM_PORTS = {
+    20: 5420,
+    1: 5425,
+    2: 5426,
+    3: 5427,
+    4: 5428,
+    5: 5429,
+}
+UDP_OUT_IP = os.getenv("IHA_VIDEO_HOST", "127.0.0.1")
+UDP_OUT_PORT = int(os.getenv("IHA_VIDEO_PORT", str(STREAM_PORTS.get(TEAM_NO, 5400 + TEAM_NO))))
 
 # =========================
 # Görüntü boyutu

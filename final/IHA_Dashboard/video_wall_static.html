@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="tr">
+
+<head>
+  <meta charset="utf-8">
+  <title>Video Wall – Kontrol Paneli</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0
+    }
+
+    :root {
+      --bg: #0a0a0f;
+      --card: #12131a;
+      --card-border: #1e2030;
+      --accent: #3b82f6;
+      --accent-glow: rgba(59, 130, 246, .25);
+      --green: #22c55e;
+      --orange: #f59e0b;
+      --red: #ef4444;
+      --text: #e2e8f0;
+      --text-dim: #64748b;
+      --radius: 10px;
+      --font: 'Inter', system-ui, sans-serif;
+    }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 16px
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 18px;
+      margin-bottom: 14px;
+      background: linear-gradient(135deg, #161825, #1a1d2e);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+    }
+
+    .header h1 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent), #a78bfa);
+      background-clip: text;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .header .badge {
+      font-size: .75rem;
+      padding: 4px 12px;
+      border-radius: 20px;
+      background: rgba(34, 197, 94, .12);
+      color: var(--green);
+      font-weight: 600;
+    }
+
+    .header .scan-btn {
+      padding: 5px 14px;
+      font-size: .72rem;
+      font-weight: 600;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--accent);
+      cursor: pointer;
+      font-family: var(--font);
+      transition: all .2s;
+      margin-left: 10px;
+    }
+
+    .header .scan-btn:hover {
+      background: var(--accent);
+      color: #fff
+    }
+
+    .header .scan-btn:disabled {
+      opacity: .5;
+      cursor: wait
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px
+    }
+
+    .cell {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      padding: 14px;
+      transition: border-color .3s, box-shadow .3s;
+    }
+
+    .cell.active {
+      border-color: var(--green);
+      box-shadow: 0 0 16px rgba(34, 197, 94, .15)
+    }
+
+    .cell-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px
+    }
+
+    .team-label {
+      font-weight: 600;
+      font-size: .88rem;
+      display: flex;
+      align-items: center;
+      gap: 7px
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      transition: all .3s
+    }
+
+    .cell.active .dot {
+      background: var(--green);
+      box-shadow: 0 0 6px var(--green)
+    }
+
+    .status-text {
+      font-size: .7rem;
+      color: var(--text-dim);
+      font-weight: 500
+    }
+
+    .cell.active .status-text {
+      color: var(--green)
+    }
+
+    /* UDP Durum Göstergesi */
+    .udp-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 8px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, .3);
+      font-size: .68rem;
+      font-weight: 500;
+      transition: all .3s;
+    }
+
+    .udp-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      transition: all .3s;
+      flex-shrink: 0;
+    }
+
+    .udp-status.online .udp-dot {
+      background: var(--green);
+      box-shadow: 0 0 6px var(--green)
+    }
+
+    .udp-status.online {
+      color: var(--green)
+    }
+
+    .udp-status.offline .udp-dot {
+      background: var(--red)
+    }
+
+    .udp-status.offline {
+      color: var(--red)
+    }
+
+    .udp-status.checking .udp-dot {
+      background: var(--orange);
+      animation: pulse 1s infinite
+    }
+
+    .udp-status.checking {
+      color: var(--orange)
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: .3
+      }
+
+      50% {
+        opacity: 1
+      }
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap
+    }
+
+    .controls label {
+      font-size: .68rem;
+      color: var(--text-dim);
+      font-weight: 500
+    }
+
+    .controls input {
+      width: 105px;
+      padding: 5px 8px;
+      font-size: .72rem;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      background: rgba(0, 0, 0, .4);
+      color: var(--text);
+      font-family: var(--font);
+      outline: none;
+      transition: border-color .2s;
+    }
+
+    .controls input:focus {
+      border-color: var(--accent)
+    }
+
+    .controls input.port-input {
+      width: 60px
+    }
+
+    .btn {
+      padding: 6px 14px;
+      font-size: .72rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: var(--font);
+      transition: all .2s;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .btn-start {
+      background: var(--green);
+      color: #000
+    }
+
+    .btn-start:hover {
+      background: #16a34a;
+      box-shadow: 0 0 12px rgba(34, 197, 94, .4)
+    }
+
+    .btn-stop {
+      background: var(--red);
+      color: #fff
+    }
+
+    .btn-stop:hover {
+      background: #dc2626;
+      box-shadow: 0 0 12px rgba(239, 68, 68, .4)
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed
+    }
+
+    .pid-info {
+      font-size: .62rem;
+      color: var(--text-dim);
+      margin-top: 6px;
+      font-family: monospace
+    }
+  </style>
+</head>
+
+<body>
+  <div class="header">
+    <h1>📡 Video Wall – Kontrol Paneli</h1>
+    <div style="display:flex;align-items:center">
+      <span class="badge" id="activeBadge">0 aktif</span>
+      <button class="scan-btn" id="scanAllBtn" onclick="probeAll()">🔍 Tümünü Tara</button>
+    </div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <script>
+    const TEAMS = [
+      { id: 20, name: "Takım 20", ip: "0.0.0.0", port: 5420 },
+      { id: 1, name: "Takım 1", ip: "0.0.0.0", port: 5425 },
+      { id: 2, name: "Takım 2", ip: "0.0.0.0", port: 5426 },
+      { id: 3, name: "Takım 3", ip: "0.0.0.0", port: 5427 },
+      { id: 4, name: "Takım 4", ip: "0.0.0.0", port: 5428 },
+      { id: 5, name: "Takım 5", ip: "0.0.0.0", port: 5429 },
+    ];
+
+    const grid = document.getElementById("grid");
+
+    TEAMS.forEach(team => {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      cell.id = `cell-${team.id}`;
+      cell.innerHTML = `
+    <div class="cell-top">
+      <span class="team-label"><span class="dot"></span>${team.name}</span>
+      <span class="status-text" id="status-${team.id}">Beklemede</span>
+    </div>
+    <div class="udp-status" id="udp-${team.id}">
+      <span class="udp-dot"></span>
+      <span id="udp-text-${team.id}">UDP durumu bilinmiyor</span>
+    </div>
+    <div class="controls">
+      <label>IP:</label>
+      <input type="text" id="ip-${team.id}" value="${team.ip}" placeholder="0.0.0.0">
+      <label>Port:</label>
+      <input type="text" class="port-input" id="port-${team.id}" value="${team.port}" placeholder="Port">
+      <button class="btn btn-start" id="btnStart-${team.id}" onclick="startStream(${team.id})">▶ Başlat</button>
+      <button class="btn btn-stop"  id="btnStop-${team.id}"  onclick="stopStream(${team.id})" disabled>⏹ Durdur</button>
+    </div>
+    <div class="pid-info" id="pid-${team.id}"></div>
+  `;
+      grid.appendChild(cell);
+    });
+
+
+    // ── UDP Port Probe ──
+    async function probePort(id) {
+      const ip = document.getElementById(`ip-${id}`).value.trim() || "0.0.0.0";
+      const port = parseInt(document.getElementById(`port-${id}`).value.trim(), 10);
+      const udpEl = document.getElementById(`udp-${id}`);
+      const udpText = document.getElementById(`udp-text-${id}`);
+
+      udpEl.className = "udp-status checking";
+      udpText.textContent = `Port ${port} kontrol ediliyor…`;
+
+      try {
+        const res = await fetch("/api/stream/probe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ip, port })
+        });
+        const data = await res.json();
+
+        if (data.has_data) {
+          udpEl.className = "udp-status online";
+          udpText.textContent = `✓ Veri var! ${data.bytes} byte – kaynak: ${data.source}`;
+        } else if (data.error) {
+          udpEl.className = "udp-status offline";
+          udpText.textContent = `⚠ Hata: ${data.error}`;
+        } else {
+          udpEl.className = "udp-status offline";
+          udpText.textContent = `✗ Port ${port}: veri yok`;
+        }
+      } catch (e) {
+        udpEl.className = "udp-status offline";
+        udpText.textContent = "Sunucu hatası";
+      }
+    }
+
+
+    async function probeAll() {
+      const btn = document.getElementById("scanAllBtn");
+      btn.disabled = true;
+      btn.textContent = "⏳ Taranıyor…";
+
+      // Sıralı tara (aynı anda birden fazla soketi açmamak için)
+      for (const team of TEAMS) {
+        await probePort(team.id);
+      }
+
+      btn.disabled = false;
+      btn.textContent = "🔍 Tümünü Tara";
+    }
+
+
+    // ── Stream Başlat / Durdur ──
+    async function startStream(id) {
+      const ip = document.getElementById(`ip-${id}`).value.trim();
+      const port = parseInt(document.getElementById(`port-${id}`).value.trim(), 10);
+      const cell = document.getElementById(`cell-${id}`);
+      const btnStart = document.getElementById(`btnStart-${id}`);
+      const btnStop = document.getElementById(`btnStop-${id}`);
+      const statusEl = document.getElementById(`status-${id}`);
+      const pidEl = document.getElementById(`pid-${id}`);
+
+      if (!ip || !port) { alert("IP ve Port değerlerini girin."); return; }
+
+      btnStart.disabled = true;
+      statusEl.textContent = "Başlatılıyor…";
+
+      try {
+        const res = await fetch(`/api/stream/start/${id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ip, port })
+        });
+        const data = await res.json();
+
+        if (data.ok) {
+          cell.classList.add("active");
+          statusEl.textContent = `udp://${ip}:${port}`;
+          btnStop.disabled = false;
+          pidEl.textContent = "ffplay penceresi açıldı";
+          updateBadge();
+        } else {
+          throw new Error("Sunucu hatası");
+        }
+      } catch (e) {
+        statusEl.textContent = "Hata!";
+        btnStart.disabled = false;
+        console.error(e);
+      }
+    }
+
+
+    async function stopStream(id) {
+      const cell = document.getElementById(`cell-${id}`);
+      const btnStart = document.getElementById(`btnStart-${id}`);
+      const btnStop = document.getElementById(`btnStop-${id}`);
+      const statusEl = document.getElementById(`status-${id}`);
+      const pidEl = document.getElementById(`pid-${id}`);
+
+      try {
+        await fetch(`/api/stream/stop/${id}`, { method: "POST" });
+      } catch (e) { console.error(e); }
+
+      cell.classList.remove("active");
+      statusEl.textContent = "Beklemede";
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      pidEl.textContent = "";
+      updateBadge();
+    }
+
+
+    function updateBadge() {
+      const count = document.querySelectorAll(".cell.active").length;
+      document.getElementById("activeBadge").textContent = `${count} aktif`;
+    }
+
+
+    // Performans: otomatik UDP port taraması kapalı.
+    // Gerektiğinde sadece üstteki "Tümünü Tara" butonuna basarak probeAll() çalıştırılır.
+
+
+    // Sayfa kapanırken tüm süreçleri durdur
+    window.addEventListener("beforeunload", () => {
+      TEAMS.forEach(t => {
+        navigator.sendBeacon(`/api/stream/stop/${t.id}`);
+      });
+    });
+  </script>
+</body>
+
+</html>

@@ -269,16 +269,20 @@ def enforce_flight_boundaries(current_lat, current_lon, current_yaw, current_spd
     return desired_yaw
 
 
-def destination_point(lat, lon, distance, bearing):
+def destination_point(lat, lon, bearing_deg, distance_m):
     R = 6371000.0  # Earth radius in meters
+    angular_distance = distance_m / R
+    bearing = math.radians(bearing_deg)
     lat1 = math.radians(lat)
     lon1 = math.radians(lon)
-    brng = math.radians(bearing)
-    
-    lat2 = math.asin(math.sin(lat1) * math.cos(distance / R) + 
-                     math.cos(lat1) * math.sin(distance / R) * math.cos(brng))
-    
-    lon2 = lon1 + math.atan2(math.sin(brng) * math.sin(distance / R) * math.cos(lat1),
-                             math.cos(distance / R) - math.sin(lat1) * math.sin(lat2))
-                             
-    return math.degrees(lat2), math.degrees(lon2)
+
+    lat2 = math.asin(
+        math.sin(lat1) * math.cos(angular_distance) +
+        math.cos(lat1) * math.sin(angular_distance) * math.cos(bearing)
+    )
+    lon2 = lon1 + math.atan2(
+        math.sin(bearing) * math.sin(angular_distance) * math.cos(lat1),
+        math.cos(angular_distance) - math.sin(lat1) * math.sin(lat2)
+    )
+
+    return math.degrees(lat2), (math.degrees(lon2) + 540.0) % 360.0 - 180.0

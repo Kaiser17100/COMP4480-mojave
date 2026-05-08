@@ -1,0 +1,216 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Geçmiş Kayıtlar</title>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+
+<style>
+body{
+  margin:0;
+  background:#0b0e11;
+  color:white;
+  font-family:Arial;
+  padding:20px;
+}
+.card{
+  background:#11151a;
+  padding:15px;
+  border-radius:8px;
+  margin-bottom:25px;
+}
+h1,h2{margin-top:0}
+table{
+  width:100%;
+  border-collapse:collapse;
+  margin-top:10px;
+}
+th,td{
+  padding:6px;
+  border-bottom:1px solid #222;
+  font-size:13px;
+}
+input{
+  background:#1a1f25;
+  border:1px solid #333;
+  color:white;
+  padding:4px;
+  margin-right:5px;
+}
+button{
+  background:#2563eb;
+  border:none;
+  padding:6px 10px;
+  color:white;
+  cursor:pointer;
+}
+button:hover{opacity:0.8}
+.muted{color:#9aa3ad;font-size:12px;margin-top:5px}
+</style>
+</head>
+
+<body>
+
+<h1>📊 Geçmiş Kayıtlar</h1>
+
+<!-- TELEMETRİ -->
+<div class="card">
+<h2>Geçmiş Telemetri</h2>
+Takım <input id="f_team" type="number">
+Başlangıç <input id="f_start" type="text" placeholder="2025-10-21T00:00:00Z">
+Bitiş <input id="f_end" type="text">
+Limit <input id="f_limit" type="number" value="500">
+<button id="btnQuery">Sorgula</button>
+
+<table id="histTable">
+<thead>
+<tr>
+<th>Zaman</th><th>Takım</th><th>Lat</th><th>Lon</th>
+<th>İrtifa</th><th>Hız</th><th>Batarya</th>
+</tr>
+</thead>
+<tbody></tbody>
+</table>
+</div>
+
+<!-- KİLİTLENME -->
+<div class="card">
+<h2>Geçmiş Kilitlenmeler</h2>
+Takım <input id="lk_team" type="number">
+Başlangıç <input id="lk_start" type="text">
+Bitiş <input id="lk_end" type="text">
+Limit <input id="lk_limit" type="number" value="500">
+<button id="btnLocksQuery">Sorgula</button>
+
+<table id="locksHistTable">
+<thead>
+<tr>
+<th>Zaman</th><th>Takım</th><th>Saat</th>
+<th>Dakika</th><th>Saniye</th><th>ms</th><th>Otonom</th>
+</tr>
+</thead>
+<tbody></tbody>
+</table>
+</div>
+
+<!-- KAMİKAZE -->
+<div class="card">
+<h2>Geçmiş Kamikaze</h2>
+Takım <input id="kz_src" type="number">
+Başlangıç <input id="kz_start" type="text">
+Bitiş <input id="kz_end" type="text">
+Limit <input id="kz_limit" type="number" value="500">
+<button id="btnKzQuery">Sorgula</button>
+
+<table id="kzHistTable">
+<thead>
+<tr>
+<th>Zaman</th><th>Takım</th>
+<th>QR</th><th>Başlangıç</th><th>Bitiş</th>
+</tr>
+</thead>
+<tbody></tbody>
+</table>
+</div>
+
+<script>
+const socket = io();
+
+/* ================= TELEMETRİ ================= */
+
+document.getElementById("btnQuery").onclick = () => {
+  socket.emit("fetch_history", {
+    takim: document.getElementById("f_team").value,
+    start: document.getElementById("f_start").value,
+    end: document.getElementById("f_end").value,
+    limit: document.getElementById("f_limit").value
+  });
+};
+
+socket.on("history_result", (data) => {
+  const tbody = document.querySelector("#histTable tbody");
+  tbody.innerHTML="";
+  data.rows.forEach(r=>{
+    tbody.innerHTML+=`
+    <tr>
+      <td>${r.ts_utc}</td>
+      <td>${r.takim}</td>
+      <td>${r.enlem}</td>
+      <td>${r.boylam}</td>
+      <td>${r.irtifa}</td>
+      <td>${r.hiz}</td>
+      <td>${r.batarya}</td>
+    </tr>`;
+  });
+});
+
+/* ================= LOCKS ================= */
+
+document.getElementById("btnLocksQuery").onclick = () => {
+  socket.emit("fetch_locks", {
+    kaynak: document.getElementById("lk_team").value,
+    start: document.getElementById("lk_start").value,
+    end: document.getElementById("lk_end").value,
+    limit: document.getElementById("lk_limit").value
+  });
+};
+
+socket.on("locks_result", (data) => {
+  const tbody = document.querySelector("#locksHistTable tbody");
+  tbody.innerHTML = "";
+
+  if (!data.ok) return;
+
+  data.rows.forEach(r => {
+
+    let gps = {};
+    if (r.kilit_bitis_gps) {
+      try {
+        gps = JSON.parse(r.kilit_bitis_gps);
+      } catch(e) {
+        gps = {};
+      }
+    }
+
+    tbody.innerHTML += `
+    <tr>
+      <td>${r.ts_utc || ""}</td>
+      <td>${r.kaynak_takim ?? ""}</td>
+      <td>${gps.saat ?? ""}</td>
+      <td>${gps.dakika ?? ""}</td>
+      <td>${gps.saniye ?? ""}</td>
+      <td>${gps.milisaniye ?? ""}</td>
+      <td>${r.otonom_kilitlenme ?? ""}</td>
+    </tr>`;
+  });
+});
+
+/* ================= KAMİKAZE ================= */
+
+document.getElementById("btnKzQuery").onclick = () => {
+  socket.emit("fetch_kamikaze", {
+    kaynak: document.getElementById("kz_src").value,
+    start: document.getElementById("kz_start").value,
+    end: document.getElementById("kz_end").value,
+    limit: document.getElementById("kz_limit").value
+  });
+};
+
+socket.on("kamikaze_result", (data) => {
+  const tbody = document.querySelector("#kzHistTable tbody");
+  tbody.innerHTML="";
+  data.rows.forEach(r=>{
+    tbody.innerHTML+=`
+    <tr>
+      <td>${r.ts_utc}</td>
+      <td>${r.kaynak_takim}</td>
+      <td>${r.qr_metni}</td>
+      <td>${JSON.stringify(r.baslangic_gps)}</td>
+      <td>${JSON.stringify(r.bitis_gps)}</td>
+    </tr>`;
+  });
+});
+</script>
+
+</body>
+</html>

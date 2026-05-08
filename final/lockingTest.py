@@ -14,17 +14,18 @@ import time
 import math
 import cv2
 import numpy as np
-import commandState as CS
 import requests
 import threading
 import subprocess
 import socket
+from urllib.parse import urlparse
 
 CURRENT_MISSION_MODE = "normal"
-BASE_URL = "http://192.168.10.2:10001"
-USERNAME = "4"
-PASSWORD = "4"
-TEAM_NO = 4
+BASE_URL = os.getenv("IHA_BASE_URL", "http://192.168.10.2:10001")
+USERNAME = os.getenv("IHA_USERNAME", "4")
+PASSWORD = os.getenv("IHA_PASSWORD", "4")
+TEAM_NO = int(os.getenv("IHA_TEAM_NO", "4"))
+MAVLINK_URL = os.getenv("IHA_MAVLINK_URL", "udpin:192.168.10.1:14580")
 
 ## GLOBAL VARIABLES ##
 FLIGHT_BOUNDARIES = [
@@ -54,17 +55,55 @@ IMG_SIZE = 640
 FOV_X_DEG = 80.0
 FOV_Y_DEG = 60.0
 PREARM_CONST = mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK
-MAX_DISTANCE_BETWEEN_ENEMY = 30.0
+MAX_DISTANCE_BETWEEN_ENEMY = 500.0
 AUTONOMOUS_FLIGHT_STATUS = 1
+FOLLOW_DISTANCE_M = 25.0
+FOLLOW_BASE_SPEED = 18.0
+FOLLOW_SPEED_GAIN = 0.45
+TARGET_AREA_RATIO = 0.045
+TRACKER_MAX_AGE = 3.0
+VISION_HOLD_SECONDS = 1.0
+STATUS_INTERVAL = 1.0
+VISION_YAW_GAIN = 0.85
+VISION_X_DEADBAND = 0.01
+VISION_DX_DAMPING_TIME = 0.04
+VISION_MIN_DISTANCE_M = 8.0
+VISION_TRAIL_RECOVERY_DISTANCE_M = 10.0
+VISION_CLOSE_SPEED_MARGIN = 1.5
+LOCK_AREA_LEFT_RATIO = 0.25
+LOCK_AREA_RIGHT_RATIO = 0.75
+LOCK_AREA_TOP_RATIO = 0.10
+LOCK_AREA_BOTTOM_RATIO = 0.90
+LOCK_MIN_WIDTH_RATIO = 0.05
+LOCK_MIN_HEIGHT_RATIO = 0.05
+LOCK_TARGET_SIZE_RATIO = 0.06
+LOCK_INSIDE_CENTERING_GAIN = 0.50
+LOCK_REQUIRED_SECONDS = 4.0
+LOCK_TOLERANCE_SECONDS = 1.0
+VISION_DYNAMIC_FOLLOW_MIN_M = 18.0
+VISION_DYNAMIC_FOLLOW_MAX_M = 35.0
+VISION_PITCH_GAIN = 0.55
+VISION_PITCH_OFFSET_LIMIT_DEG = 10.0
+VISION_DIVE_GUARD_DISTANCE_M = 35.0
+VISION_CLOSE_DIVE_LIMIT_DEG = 6.0
+VISION_PITCH_HOLD_SECONDS = 0.35
+VISION_PITCH_CMD_RATE_DPS = 18.0
+GPS_REACQUIRE_PITCH_LIMIT_DEG = 7.0
+GPS_PITCH_CMD_RATE_DPS = 6.0
+ALTITUDE_DEADBAND_M = 3.0
+GUIDED_TRIM_THROTTLE = 0.60
+GUIDED_MIN_THROTTLE = 0.25
+GUIDED_MAX_THROTTLE = 1.00
+GUIDED_THROTTLE_RATE = 0.80
 session = requests.Session()
 hss_list = []
 
 
 ## HELPERS ##
 
-connection = mavutil.mavlink_connection("udpin:192.168.10.1:14580")
+connection = mavutil.mavlink_connection(MAVLINK_URL)
 connection.wait_heartbeat()
-print("Connected to Fixed-Wing Vehicle...")
+print(f"Connected to Fixed-Wing Vehicle via {MAVLINK_URL}...")
 
 connection.mav.request_data_stream_send(
     connection.target_system,
@@ -73,6 +112,180 @@ connection.mav.request_data_stream_send(
     20,
     1
 )
+
+
+class TargetTelemetry:
+    SERVER_FIELDS = {
+        'iha_enlem': 'lat',
+        'iha_boylam': 'lon',
+        'iha_irtifa': 'alt',
+        'iha_dikilme': 'pitch',
+        'iha_yonelme': 'yaw',
+        'iha_yatis': 'roll',
+        'iha_hizi': 'speed',
+        'gps_saati': 'gps_time',
+    }
+
+    def __init__(self):
+        for attr in self.SERVER_FIELDS.values():
+            setattr(self, attr, None)
+        self.team_no = None
+
+    def update_from_server(self, enemy):
+        if not enemy:
+            return False
+        self.team_no = enemy.get('takim_numarasi')
+        for field, attr in self.SERVER_FIELDS.items():
+            value = enemy.get(field)
+            if field == 'gps_saati':
+                setattr(self, attr, value)
+                continue
+            try:
+                value = None if value is None else float(value)
+            except (TypeError, ValueError):
+                value = None
+            setattr(self, attr, value)
+        return self.has_position()
+
+    def has_position(self):
+        return self.lat is not None and self.lon is not None
+
+    def has_reacquire_data(self):
+        return self.has_position() and self.alt is not None and self.yaw is not None
+
+
+def _time_boot_ms():
+    return int((time.monotonic() * 1000.0) % 4294967295)
+
+
+def _param_name(param_id):
+    if isinstance(param_id, bytes):
+        return param_id.split(b'\x00', 1)[0].decode('ascii', errors='ignore')
+    return str(param_id).split('\x00', 1)[0]
+
+
+def set_float_param(name, value, retries=3):
+    encoded_name = name.encode('ascii')
+    for _ in range(retries):
+        connection.mav.param_set_send(
+            connection.target_system,
+            connection.target_component,
+            encoded_name,
+            float(value),
+            mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+        )
+
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            msg = connection.recv_match(type='PARAM_VALUE', blocking=True, timeout=0.2)
+            if msg is None or _param_name(msg.param_id) != name:
+                continue
+            print(f"[Param] {name} = {msg.param_value:.1f}")
+            return True
+
+    print(f"[Param] WARNING: {name} could not be set to {value}")
+    return False
+
+
+def configure_speed_limits():
+    set_float_param('AIRSPEED_MAX', AXIS_BOUNDS['speed'][1])
+
+
+def _euler_to_quaternion(roll_deg, pitch_deg, yaw_deg):
+    roll = math.radians(roll_deg)
+    pitch = math.radians(pitch_deg)
+    yaw = math.radians(yaw_deg)
+
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+
+    return [
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ]
+
+
+def _attitude_type_mask(include_pitch, include_throttle=False):
+    selected = 0
+    if include_pitch:
+        selected |= 0b00000010
+    if include_throttle:
+        selected |= 0b01000000
+    return 0xFF ^ selected
+
+
+def send_guided_heading(heading_deg):
+    roll_limit = AXIS_BOUNDS['roll'][1]
+    heading_accel = math.tan(math.radians(roll_limit)) * 9.80665
+    connection.mav.command_int_send(
+        connection.target_system,
+        connection.target_component,
+        mavutil.mavlink.MAV_FRAME_GLOBAL,
+        mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_HEADING,
+        0,
+        0,
+        1,
+        heading_deg % 360.0,
+        heading_accel,
+        0,
+        0,
+        0,
+        0,
+    )
+
+
+def send_guided_speed(speed):
+    if speed is None:
+        return
+    speed = mathHelpers.clamp(speed, AXIS_BOUNDS['speed'][0], AXIS_BOUNDS['speed'][1])
+    connection.mav.command_int_send(
+        connection.target_system,
+        connection.target_component,
+        mavutil.mavlink.MAV_FRAME_GLOBAL,
+        mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_SPEED,
+        0,
+        0,
+        0,
+        speed,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+
+
+def send_guided_attitude(current_roll, target_pitch, current_yaw, throttle=None):
+    include_pitch = target_pitch is not None
+    include_throttle = throttle is not None
+    if not include_pitch and not include_throttle:
+        return
+
+    pitch = 0.0 if target_pitch is None else target_pitch
+    thrust = 0.0 if throttle is None else mathHelpers.clamp(
+        throttle,
+        GUIDED_MIN_THROTTLE,
+        GUIDED_MAX_THROTTLE,
+    )
+    q = _euler_to_quaternion(current_roll, pitch, current_yaw)
+    connection.mav.set_attitude_target_send(
+        _time_boot_ms(),
+        connection.target_system,
+        connection.target_component,
+        _attitude_type_mask(include_pitch, include_throttle),
+        q,
+        0.0,
+        0.0,
+        0.0,
+        thrust,
+    )
+
 
 def input_thread_func():
     global CURRENT_MISSION_MODE
@@ -132,20 +345,34 @@ def wait_for_takeoff():
             last_print = now
 
         if alt_m >= TAKEOFF_ALT_TARGET - TAKEOFF_ALT_THRESH:
-            print(f"[Takeoff] Target altitude reached. Switching to FBWA outer loops ...")
+            print(f"[Takeoff] Target altitude reached. Switching to GUIDED setpoints ...")
             break
 
 
 # =========================
 # RTP/H264 UDP GİRİŞ
 # =========================
-UDP_IN_PORT = 5600
+UDP_IN_PORT = int(os.getenv("IHA_CAMERA_IN_PORT", "5600"))
 
 # =========================
 # ÇIKIŞ JPEG UDP
 # =========================
-UDP_OUT_IP = "127.0.0.1"
-UDP_OUT_PORT = 5426
+STREAM_PORTS = {
+    20: 5420,
+    1: 5425,
+    2: 5426,
+    3: 5427,
+    4: 5428,
+    5: 5429,
+}
+
+
+def _base_host(base_url):
+    return urlparse(base_url).hostname or "127.0.0.1"
+
+
+UDP_OUT_IP = os.getenv("IHA_VIDEO_HOST", _base_host(BASE_URL))
+UDP_OUT_PORT = int(os.getenv("IHA_VIDEO_PORT", str(STREAM_PORTS.get(TEAM_NO, 5400 + TEAM_NO))))
 
 # =========================
 # Görüntü boyutu
@@ -213,6 +440,165 @@ def start_ffmpeg():
     )
     stderr_thread.start()
     return process
+
+
+def make_tracker():
+    if hasattr(cv2, 'TrackerCSRT_create'):
+        return cv2.TrackerCSRT_create()
+    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+        return cv2.legacy.TrackerCSRT_create()
+    if hasattr(cv2, 'TrackerKCF_create'):
+        return cv2.TrackerKCF_create()
+    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerKCF_create'):
+        return cv2.legacy.TrackerKCF_create()
+    return None
+
+
+def xyxy_to_tracker_box(x1, y1, x2, y2, frame_w, frame_h):
+    x1 = mathHelpers.clamp(float(x1), 0.0, frame_w - 1.0)
+    y1 = mathHelpers.clamp(float(y1), 0.0, frame_h - 1.0)
+    x2 = mathHelpers.clamp(float(x2), x1 + 1.0, frame_w)
+    y2 = mathHelpers.clamp(float(y2), y1 + 1.0, frame_h)
+    return (x1, y1, x2 - x1, y2 - y1)
+
+
+def tracker_box_to_xyxy(box):
+    x, y, bw, bh = box
+    return x, y, x + bw, y + bh
+
+
+def lock_area_bounds(frame_w, frame_h):
+    return (
+        int(frame_w * LOCK_AREA_LEFT_RATIO),
+        int(frame_h * LOCK_AREA_TOP_RATIO),
+        int(frame_w * LOCK_AREA_RIGHT_RATIO),
+        int(frame_h * LOCK_AREA_BOTTOM_RATIO),
+    )
+
+
+def lock_status(obj_cx, obj_cy, box_w, box_h, frame_w, frame_h):
+    left, top, right, bottom = lock_area_bounds(frame_w, frame_h)
+    in_x = left <= obj_cx <= right
+    in_y = top <= obj_cy <= bottom
+    center_inside = in_x and in_y
+    size_ok = (
+        box_w >= frame_w * LOCK_MIN_WIDTH_RATIO and
+        box_h >= frame_h * LOCK_MIN_HEIGHT_RATIO
+    )
+    return center_inside, size_ok, in_x, in_y
+
+
+def lock_guidance_error(dx_norm, dy_norm, in_x, in_y):
+    guide_dx = dx_norm * LOCK_INSIDE_CENTERING_GAIN if in_x else dx_norm
+    guide_dy = dy_norm * LOCK_INSIDE_CENTERING_GAIN if in_y else dy_norm
+    return guide_dx, guide_dy
+
+
+def speed_from_distance(current_lat, current_lon, target_lat, target_lon):
+    if None in (current_lat, current_lon, target_lat, target_lon):
+        return None
+
+    dist = mathHelpers.get_distance(current_lat, current_lon, target_lat, target_lon)
+    dist_error = dist - FOLLOW_DISTANCE_M
+    desired_speed = mathHelpers.clamp(
+        FOLLOW_BASE_SPEED + (dist_error * FOLLOW_SPEED_GAIN),
+        AXIS_BOUNDS['speed'][0],
+        AXIS_BOUNDS['speed'][1],
+    )
+    return desired_speed, dist
+
+
+def dynamic_follow_distance_from_box(box_w_ratio, box_h_ratio, current_dist):
+    visible_size = min(box_w_ratio, box_h_ratio)
+    if current_dist is None or visible_size <= 0.0:
+        return FOLLOW_DISTANCE_M
+
+    desired_distance = current_dist * (visible_size / LOCK_TARGET_SIZE_RATIO)
+    return mathHelpers.clamp(
+        desired_distance,
+        VISION_DYNAMIC_FOLLOW_MIN_M,
+        VISION_DYNAMIC_FOLLOW_MAX_M,
+    )
+
+
+def vision_speed_from_distance(current_lat, current_lon, target_lat, target_lon, target_speed, box_w_ratio, box_h_ratio):
+    if None in (current_lat, current_lon, target_lat, target_lon):
+        return None
+
+    dist = mathHelpers.get_distance(current_lat, current_lon, target_lat, target_lon)
+    follow_distance = dynamic_follow_distance_from_box(box_w_ratio, box_h_ratio, dist)
+    dist_error = dist - follow_distance
+    low, high = AXIS_BOUNDS['speed']
+    target_speed_cmd = None
+    if target_speed is not None:
+        target_speed_cmd = mathHelpers.clamp(target_speed, low, high)
+
+    base_speed = target_speed_cmd if target_speed_cmd is not None else FOLLOW_BASE_SPEED
+    desired_speed = base_speed + (dist_error * FOLLOW_SPEED_GAIN)
+
+    if dist <= VISION_MIN_DISTANCE_M:
+        if target_speed_cmd is not None:
+            close_speed = mathHelpers.clamp(target_speed_cmd - VISION_CLOSE_SPEED_MARGIN, low, high)
+            return close_speed, dist, follow_distance
+        return low, dist, follow_distance
+
+    if target_speed_cmd is not None and dist <= follow_distance:
+        close_speed = mathHelpers.clamp(target_speed_cmd - VISION_CLOSE_SPEED_MARGIN, low, high)
+        blend = (dist - VISION_MIN_DISTANCE_M) / (follow_distance - VISION_MIN_DISTANCE_M)
+        blend = mathHelpers.clamp(blend, 0.0, 1.0)
+        desired_speed = close_speed + (blend * (target_speed_cmd - close_speed))
+        return mathHelpers.clamp(desired_speed, low, high), dist, follow_distance
+
+    if target_speed_cmd is not None:
+        desired_speed = max(desired_speed, target_speed_cmd)
+
+    return mathHelpers.clamp(desired_speed, low, high), dist, follow_distance
+
+
+def target_trail_yaw(current_lat, current_lon, target_lat, target_lon, target_yaw, trail_distance=FOLLOW_DISTANCE_M):
+    if None in (current_lat, current_lon, target_lat, target_lon, target_yaw):
+        return None
+
+    behind_bearing = (target_yaw + 180.0) % 360.0
+    behind_lat, behind_lon = mathHelpers.destination_point(
+        target_lat,
+        target_lon,
+        behind_bearing,
+        trail_distance,
+    )
+    return mathHelpers.get_bearing(current_lat, current_lon, behind_lat, behind_lon)
+
+
+def vision_pitch_from_target(smoothed_dy, target_pitch, dist):
+    low, high = AXIS_BOUNDS['pitch']
+    pitch_reference = target_pitch if target_pitch is not None else 0.0
+    pitch_reference = mathHelpers.clamp(pitch_reference, low, high)
+    pitch_offset = -smoothed_dy * (FOV_Y_DEG / 2.0) * VISION_PITCH_GAIN
+    pitch_offset = mathHelpers.clamp(
+        pitch_offset,
+        -VISION_PITCH_OFFSET_LIMIT_DEG,
+        VISION_PITCH_OFFSET_LIMIT_DEG,
+    )
+    desired_pitch = pitch_reference + pitch_offset
+
+    if dist is not None and dist <= VISION_DIVE_GUARD_DISTANCE_M:
+        min_pitch = mathHelpers.clamp(
+            pitch_reference - VISION_CLOSE_DIVE_LIMIT_DEG,
+            low,
+            high,
+        )
+        desired_pitch = max(desired_pitch, min_pitch)
+
+    return mathHelpers.clamp(desired_pitch, low, high)
+
+
+def rate_limit_value(current_value, desired_value, max_rate, dt):
+    step_limit = abs(max_rate) * max(dt, DT_MIN)
+    return current_value + mathHelpers.clamp(
+        desired_value - current_value,
+        -step_limit,
+        step_limit,
+    )
 
 
 def draw_minimap(current_lat, current_lon, current_yaw, hss_list, flight_boundaries, target_lat=None, target_lon=None, qr_lat=None, qr_lon=None):
@@ -302,24 +688,8 @@ def draw_minimap(current_lat, current_lon, current_yaw, hss_list, flight_boundar
 
 ## CONTROLLER SETUP & MAIN LOOP
 
-# these are product of husein
 def make_controllers() -> dict:
     return {
-        'pitch_att': controllers.HybridController(
-            pid_ctrl=controllers.PIDController(kp=0.45, ki=0.10, kd=0.08, integral_limit=20.0, output_limit=15.0,
-                                               integral_zone=18.0, rate_filter_tau=0.10),
-            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=25.0, rate_range=40.0),
-        ),
-        'roll_att': controllers.HybridController(
-            pid_ctrl=controllers.PIDController(kp=0.50, ki=0.10, kd=0.08, integral_limit=25.0, output_limit=18.0,
-                                               integral_zone=20.0, rate_filter_tau=0.10),
-            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=35.0, rate_range=50.0),
-        ),
-        'heading': controllers.HybridController(
-            pid_ctrl=controllers.PIDController(kp=0.40, ki=0.035, kd=0.05, integral_limit=80.0, output_limit=35.0,
-                                               integral_zone=90.0, rate_filter_tau=0.12),
-            fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=120.0, rate_range=40.0),
-        ),
         'altitude': controllers.HybridController(
             pid_ctrl=controllers.PIDController(kp=0.65, ki=0.08, kd=0.04, integral_limit=60.0, output_limit=18.0,
                                                integral_zone=35.0, rate_filter_tau=0.18),
@@ -330,8 +700,6 @@ def make_controllers() -> dict:
                                                integral_zone=12.0, rate_filter_tau=0.20),
             fuzzy_ctrl=controllers.FuzzyGainScheduler(error_range=12.0, rate_range=6.0),
         ),
-        'vision_pan': controllers.PIDController(kp=35.0, ki=5.0, kd=10.0, output_limit=40.0),
-        'vision_tilt': controllers.PIDController(kp=20.0, ki=2.0, kd=5.0, output_limit=25.0),
     }
 
 telemetry_data = {
@@ -434,6 +802,14 @@ def async_send_telemetry(kwargs):
     except Exception as e:
         print("Telemetry send failed:", e)
 
+
+def async_send_lock(lock_end_time):
+    try:
+        telemetry.send_lock(session, BASE_URL, token, AUTONOMOUS_FLIGHT_STATUS, lock_end_time)
+    except Exception as e:
+        print("[LOCK] API Hatası:", e)
+
+
 def main_loop():
     global CURRENT_MISSION_MODE
     global closest_enemy
@@ -467,34 +843,53 @@ def main_loop():
     cruise_pitch_deg = telemetry_data['pitch']
     cruise_yaw_deg = telemetry_data['yaw']
 
-    connection.set_mode('FBWA')
+    connection.set_mode('GUIDED')
     time.sleep(0.5)
 
-    cmd = CS.CommandState()
-    cmd.target_yaw = cruise_yaw_deg
+    cmd_pitch = None
+    cmd_yaw = cruise_yaw_deg
+    cmd_alt = None
+    cmd_speed = FOLLOW_BASE_SPEED
 
     prev_meas = {'alt': None, 'speed': None, 'alt_rate_smoothed': 0.0, 'spd_rate_smoothed': 0.0}
     prev_time = time.time()
-    trim_thrust = 0.60
-    current_thrust = 0.8
 
     current_roll = cruise_roll_deg
     current_pitch = cruise_pitch_deg
     current_yaw = cruise_yaw_deg
-    current_roll_rate = current_pitch_rate = current_yaw_rate = 0.0
     current_alt = TAKEOFF_ALT_TARGET
     current_spd = 15.0
+    current_lat = None
+    current_lon = None
+
     smoothed_dx = 0.0
     smoothed_dy = 0.0
     filter_alpha = 0.3
-    desired_roll = 0.0
 
-    current_lat = None
-    current_lon = None
-    target_lat = None
-    target_lon = None
-    target_alt = TAKEOFF_ALT_TARGET
-    enemies = []
+    target = TargetTelemetry()
+    target_pitch_cmd = cruise_pitch_deg
+    target_speed_cmd = current_spd
+    target_throttle_cmd = GUIDED_TRIM_THROTTLE
+
+    last_vision_yaw = None
+    last_vision_pitch = None
+    last_visual_speed = FOLLOW_BASE_SPEED
+    last_visual_time = 0.0
+    last_yolo_time = 0.0
+    last_status_time = 0.0
+    last_telemetry_time = 0.0
+    lock_start_time = None
+    lock_last_valid_time = 0.0
+    lock_elapsed = 0.0
+    lock_ready = False
+    lock_sent = False
+
+    yolo_hits = 0
+    tracker_hits = 0
+    frame_count = 0
+    tracker = None
+    tracker_active = False
+
     qr_resp = telemetry.get_qr(session, BASE_URL, token)
     qr_enlem = qr_resp.get("qrEnlem") if qr_resp else None
     qr_boylam = qr_resp.get("qrBoylam") if qr_resp else None
@@ -502,326 +897,403 @@ def main_loop():
     qr_mission_state = "APPROACH"
     qr_data = None
     kamikaze_start_time = {}
-    
-    # Kilitlenme (Lock) variables
-    is_locked_on = False
-    lock_start_time = 0.0
-    LOCK_REQUIRED_TIME = 4.0  # Başarılı kilitlenme sayılması için hedefin merkezde kalması gereken minimum süre (sn)
-    LOCK_BBOX_THRESHOLD = 0.15 # Kameranın merkezinden %15 sapma payı (Kilitlenme kutusu boyutu)
-
-    last_vision_yaw = None
-    last_vision_pitch = None
     sended_qr = False
 
-    # override = False
     global hss_list
-    last_telemetry_time = 0.0
-    battery = 100.0
-
     while True:
         now = time.time()
         dt = max(now - prev_time, DT_MIN)
         prev_time = now
 
-        # Retrieve the freshest telemetry data from the background thread
         current_roll = telemetry_data['roll']
         current_pitch = telemetry_data['pitch']
         current_yaw = telemetry_data['yaw']
-        current_roll_rate = telemetry_data['roll_rate']
-        current_pitch_rate = telemetry_data['pitch_rate']
-        current_yaw_rate = telemetry_data['yaw_rate']
         current_alt = telemetry_data['alt']
         current_lat = telemetry_data['lat']
         current_lon = telemetry_data['lon']
         current_spd = telemetry_data['spd']
         battery = telemetry_data['battery']
+        gps_time = telemetry.now_clock()
+
+        if CURRENT_MISSION_MODE == "enemy":
+            target.update_from_server(closest_enemy)
 
         hedef_x = hedef_y = hedef_w = hedef_h = 0
-        gps_time = telemetry.now_clock()
-        ## AI RELATED STUFF ##
+        visual_source = 'none'
+        yaw_source = 'GPS'
+        pitch_source = 'LEVEL'
+        visual_score = 0.0
+        current_lock_candidate = False
+        lock_center_inside = False
+        lock_size_ok = False
+        box_w_ratio = 0.0
+        box_h_ratio = 0.0
+        vision_follow_distance = FOLLOW_DISTANCE_M
         ret, frame = cam_thread.read()
-        if not ret:
-            print("Frame Cannot be Read")
+
+        if CURRENT_MISSION_MODE != "enemy":
+            tracker = None
+            tracker_active = False
 
         if ret:
+            frame_count += 1
             h, w = frame.shape[:2]
+            cv2.circle(frame, (w // 2, h // 2), 5, (0, 255, 255), -1)
+            lock_left, lock_top, lock_right, lock_bottom = lock_area_bounds(w, h)
+            cv2.rectangle(frame, (lock_left, lock_top), (lock_right, lock_bottom), (0, 255, 255), 2)
+
+            visual_box = None
+            if CURRENT_MISSION_MODE == "enemy":
+                results = model.predict(frame, imgsz=IMG_SIZE, conf=CONF, verbose=False)
+                result = results[0]
+
+                if result.boxes is not None and len(result.boxes) > 0:
+                    boxes_xyxy = result.boxes.xyxy.cpu().numpy()
+                    confs = result.boxes.conf.cpu().numpy()
+                    best_idx = confs.argmax()
+                    visual_box = tuple(float(x) for x in boxes_xyxy[best_idx])
+                    visual_score = float(confs[best_idx])
+                    visual_source = 'YOLO'
+                    yolo_hits += 1
+                    last_yolo_time = now
+
+                    new_tracker = make_tracker()
+                    if new_tracker is not None:
+                        try:
+                            new_tracker.init(frame, xyxy_to_tracker_box(*visual_box, w, h))
+                            tracker = new_tracker
+                            tracker_active = True
+                        except cv2.error:
+                            tracker = None
+                            tracker_active = False
+
+                elif tracker_active and tracker is not None and (now - last_yolo_time) <= TRACKER_MAX_AGE:
+                    try:
+                        ok, track_box = tracker.update(frame)
+                    except cv2.error:
+                        ok, track_box = False, None
+
+                    if ok:
+                        visual_box = tracker_box_to_xyxy(track_box)
+                        visual_source = 'TRACK'
+                        tracker_hits += 1
+                    else:
+                        tracker = None
+                        tracker_active = False
+
+            if CURRENT_MISSION_MODE == "enemy" and visual_box is not None:
+                x1, y1, bw, bh = xyxy_to_tracker_box(*visual_box, w, h)
+                x2 = x1 + bw
+                y2 = y1 + bh
+                obj_cx, obj_cy, dx_norm, dy_norm = mathHelpers.compute_center_deviation(x1, y1, x2, y2, w, h)
+                hedef_x = int(obj_cx)
+                hedef_y = int(obj_cy)
+                hedef_w = int(bw)
+                hedef_h = int(bh)
+                box_w_ratio = bw / w
+                box_h_ratio = bh / h
+
+                lock_center_inside, lock_size_ok, lock_in_x, lock_in_y = lock_status(obj_cx, obj_cy, bw, bh, w, h)
+                current_lock_candidate = lock_center_inside and lock_size_ok
+                guide_dx_norm, guide_dy_norm = lock_guidance_error(dx_norm, dy_norm, lock_in_x, lock_in_y)
+
+                source_alpha = filter_alpha if visual_source == 'YOLO' else 0.18
+                prev_smoothed_dx = smoothed_dx
+                smoothed_dx = (source_alpha * guide_dx_norm) + ((1.0 - source_alpha) * smoothed_dx)
+                smoothed_dy = (source_alpha * guide_dy_norm) + ((1.0 - source_alpha) * smoothed_dy)
+                dx_rate = (smoothed_dx - prev_smoothed_dx) / dt
+
+                if current_lock_candidate:
+                    box_color = (0, 255, 0)
+                elif lock_center_inside:
+                    box_color = (0, 165, 255)
+                else:
+                    box_color = (0, 0, 255)
+                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
+                cv2.circle(frame, (int(obj_cx), int(obj_cy)), 5, (0, 0, 255), -1)
+                cv2.line(frame, (w // 2, h // 2), (int(obj_cx), int(obj_cy)), (255, 0, 0), 2)
+                cv2.putText(frame, f"{visual_source} conf={visual_score:.2f}", (int(x1), max(20, int(y1) - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
+
+                yaw_control_dx = smoothed_dx
+                if abs(yaw_control_dx) <= VISION_X_DEADBAND:
+                    yaw_control_dx = 0.0
+                elif yaw_control_dx * dx_rate < 0.0:
+                    damped_dx = yaw_control_dx + (dx_rate * VISION_DX_DAMPING_TIME)
+                    if yaw_control_dx > 0.0:
+                        yaw_control_dx = mathHelpers.clamp(damped_dx, 0.0, yaw_control_dx)
+                    else:
+                        yaw_control_dx = mathHelpers.clamp(damped_dx, yaw_control_dx, 0.0)
+
+                angle_offset = yaw_control_dx * (FOV_X_DEG / 2.0) * VISION_YAW_GAIN
+                desired_yaw_from_vision = (current_yaw + angle_offset) % 360.0
+                yaw_source = 'IMG'
+
+                speed_info = vision_speed_from_distance(
+                    current_lat,
+                    current_lon,
+                    target.lat,
+                    target.lon,
+                    target.speed,
+                    box_w_ratio,
+                    box_h_ratio,
+                )
+                vision_dist = speed_info[1] if speed_info is not None else None
+                vision_follow_distance = speed_info[2] if speed_info is not None else FOLLOW_DISTANCE_M
+
+                if (
+                    vision_dist is not None
+                    and vision_dist < VISION_TRAIL_RECOVERY_DISTANCE_M
+                    and not lock_center_inside
+                ):
+                    trail_yaw = target_trail_yaw(
+                        current_lat,
+                        current_lon,
+                        target.lat,
+                        target.lon,
+                        target.yaw,
+                        vision_follow_distance,
+                    )
+                    if trail_yaw is not None:
+                        desired_yaw_from_vision = trail_yaw
+                        yaw_source = 'TRAIL'
+
+                desired_pitch_from_vision = vision_pitch_from_target(smoothed_dy, target.pitch, vision_dist)
+                last_vision_yaw = desired_yaw_from_vision
+                last_vision_pitch = desired_pitch_from_vision
+                last_visual_time = now
+                cmd_yaw = desired_yaw_from_vision
+                cmd_pitch = desired_pitch_from_vision
+                cmd_alt = None
+
+                if speed_info is not None:
+                    cmd_speed = speed_info[0]
+                    last_visual_speed = cmd_speed
+                else:
+                    box_area = bw * bh
+                    area_ratio = box_area / (w * h)
+                    area_error = TARGET_AREA_RATIO - area_ratio
+                    cmd_speed = mathHelpers.clamp(
+                        FOLLOW_BASE_SPEED + (area_error * 80.0),
+                        AXIS_BOUNDS['speed'][0],
+                        AXIS_BOUNDS['speed'][1],
+                    )
+                    last_visual_speed = cmd_speed
+
+            elif CURRENT_MISSION_MODE == "enemy":
+                visual_recent = last_visual_time > 0.0 and (now - last_visual_time) <= VISION_HOLD_SECONDS
+                if visual_recent and last_vision_yaw is not None and last_vision_pitch is not None:
+                    visual_source = 'HOLD'
+                    yaw_source = 'HOLD'
+                    visual_age = now - last_visual_time
+                    cmd_yaw = last_vision_yaw
+                    cmd_pitch = last_vision_pitch if visual_age <= VISION_PITCH_HOLD_SECONDS else None
+                    cmd_alt = None
+                    cmd_speed = last_visual_speed
+                else:
+                    cmd_pitch = None
+                    speed_info = speed_from_distance(current_lat, current_lon, target.lat, target.lon)
+                    cmd_speed = speed_info[0] if speed_info is not None else FOLLOW_BASE_SPEED
+
+                    if current_lat is not None and current_lon is not None and target.has_reacquire_data():
+                        behind_bearing = (target.yaw + 180.0) % 360.0
+                        behind_lat, behind_lon = mathHelpers.destination_point(
+                            target.lat,
+                            target.lon,
+                            behind_bearing,
+                            FOLLOW_DISTANCE_M,
+                        )
+                        desired_yaw = mathHelpers.get_bearing(current_lat, current_lon, behind_lat, behind_lon)
+                        speed_info = speed_from_distance(current_lat, current_lon, behind_lat, behind_lon)
+                        cmd_speed = speed_info[0] if speed_info is not None else FOLLOW_BASE_SPEED
+                        cmd_yaw = desired_yaw
+                        cmd_alt = target.alt
+                        yaw_source = 'TRAIL'
+                    else:
+                        if cmd_yaw is None:
+                            cmd_yaw = current_yaw
+                        cmd_alt = TAKEOFF_ALT_TARGET
+                        yaw_source = 'LEVEL'
+
+            if CURRENT_MISSION_MODE == "qr":
+                last_vision_yaw = None
+                last_vision_pitch = None
+                cmd_speed = FOLLOW_BASE_SPEED
+
+                if qr_enlem is not None and qr_boylam is not None and current_lat is not None and current_lon is not None:
+                    dist_to_qr = mathHelpers.get_distance(current_lat, current_lon, qr_enlem, qr_boylam)
+                    cmd_yaw = mathHelpers.get_bearing(current_lat, current_lon, qr_enlem, qr_boylam)
+
+                    if qr_mission_state == "APPROACH":
+                        cmd_alt = 110.0
+                        cmd_pitch = None
+                        if dist_to_qr < 170.0 and current_alt > 100.0:
+                            kamikaze_start_time = telemetry.now_clock()
+                            qr_mission_state = "DIVE"
+                            print("[QR MISSION] Close to QR! Initiating DIVE!")
+
+                    elif qr_mission_state == "DIVE":
+                        cmd_pitch = -35.0
+                        cmd_alt = None
+                        cmd_speed = AXIS_BOUNDS['speed'][0]
+                        qr_vision_yaw = None
+                        qr_data, bbox = None, None
+
+                        try:
+                            qr_data, bbox, _ = qr_detector.detectAndDecode(frame)
+                        except cv2.error:
+                            pass
+
+                        if bbox is not None:
+                            pts = bbox[0]
+                            qr_cx = sum(p[0] for p in pts) / 4.0
+                            qr_cy = sum(p[1] for p in pts) / 4.0
+                            dx_norm = (qr_cx - w / 2.0) / (w / 2.0)
+                            dy_norm = (qr_cy - h / 2.0) / (h / 2.0)
+                            qr_vision_yaw = (current_yaw + dx_norm * (FOV_X_DEG / 2.0)) % 360.0
+                            vision_pitch = current_pitch - dy_norm * (FOV_Y_DEG / 2.0)
+                            cmd_pitch = mathHelpers.clamp(vision_pitch, -45.0, -15.0)
+                            pts = np.int32(pts).reshape(-1, 1, 2)
+                            cv2.polylines(frame, [pts], True, (255, 0, 255), 2)
+                            cv2.circle(frame, (int(qr_cx), int(qr_cy)), 5, (0, 255, 255), -1)
+
+                        if qr_data:
+                            print(f"[QR MISSION] QR detected: {qr_data}")
+                            if qr_resp and not sended_qr:
+                                kamikaze_zaman = telemetry.now_clock()
+                                telemetry.send_kamikaze(session, BASE_URL, token, TEAM_NO, qr_data, kamikaze_start_time, kamikaze_zaman)
+                                sended_qr = True
+                                qr_mission_state = "PULLOUT"
+                                print("[QR MISSION] QR read successfully! Returning to normal flight.")
+
+                        if qr_vision_yaw is not None:
+                            cmd_yaw = qr_vision_yaw
+                        if current_alt < 45.0:
+                            qr_mission_state = "PULLOUT"
+                            CURRENT_MISSION_MODE = "normal"
+                            print("[QR MISSION] Alt < 45m! Aborting dive, pulling out!")
+
+                    elif qr_mission_state == "PULLOUT":
+                        cmd_yaw = mathHelpers.get_bearing(current_lat, current_lon, qr_enlem, qr_boylam)
+                        cmd_alt = TAKEOFF_ALT_TARGET
+                        cmd_pitch = None
+                        qr_mission_state = "APPROACH"
+                        CURRENT_MISSION_MODE = "normal"
+                        print("[QR MISSION] Returning to normal flight.")
+
+            if CURRENT_MISSION_MODE == "normal":
+                cmd_pitch = None
+                cmd_alt = TAKEOFF_ALT_TARGET
+                cmd_speed = FOLLOW_BASE_SPEED
+                cmd_yaw = current_yaw
+                yaw_source = 'LEVEL'
+
+            if current_lock_candidate:
+                if lock_start_time is None:
+                    lock_start_time = now
+                    lock_sent = False
+                    print("[LOCK] Kilitlenme başladı.")
+                lock_last_valid_time = now
+            elif lock_start_time is not None and (now - lock_last_valid_time) > LOCK_TOLERANCE_SECONDS:
+                print(f"[LOCK] Kilit koptu. Süre: {lock_elapsed:.1f}s")
+                lock_start_time = None
+                lock_last_valid_time = 0.0
+                lock_sent = False
+
+            lock_elapsed = now - lock_start_time if lock_start_time is not None else 0.0
+            lock_ready = lock_elapsed >= LOCK_REQUIRED_SECONDS
+            if lock_ready and not lock_sent:
+                lock_sent = True
+                print("[LOCK] Başarılı kilit. API'ye gönderiliyor...")
+                threading.Thread(target=async_send_lock, args=(telemetry.now_clock(),), daemon=True).start()
+
+            lock_text = f"LOCK {min(lock_elapsed, LOCK_REQUIRED_SECONDS):.1f}/{LOCK_REQUIRED_SECONDS:.0f}s"
+            lock_color = (0, 255, 0) if lock_ready else (0, 255, 255)
+            cv2.putText(frame, lock_text, (lock_left, max(20, lock_top - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, lock_color, 2)
+            cv2.imshow("YOLOv8 Pose UDP Inference", frame)
 
             success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             if success:
                 send_sock.sendto(buffer.tobytes(), (UDP_OUT_IP, UDP_OUT_PORT))
 
-            if CURRENT_MISSION_MODE == "enemy":
-                results = model.predict(frame, imgsz=IMG_SIZE, conf=CONF, verbose=False)
-                result = results[0]
-
-            # Draw locking zone on screen
-            lock_box_w = int(w * LOCK_BBOX_THRESHOLD * 2)
-            lock_box_h = int(h * LOCK_BBOX_THRESHOLD * 2)
-            box_color = (0, 0, 255) if is_locked_on else (255, 255, 0)
-            cv2.rectangle(frame, (w//2 - lock_box_w//2, h//2 - lock_box_h//2), (w//2 + lock_box_w//2, h//2 + lock_box_h//2), box_color, 2)
-            cv2.circle(frame, (w // 2, h // 2), 5, (0, 255, 255), -1)
-
-            if CURRENT_MISSION_MODE == "qr":
-                last_vision_yaw = None
-                last_vision_pitch = None
-
-            # if target plane is visible on the screen
-            if CURRENT_MISSION_MODE == "enemy" and result.boxes is not None and len(result.boxes) > 0:
-                boxes_xyxy = result.boxes.xyxy.cpu().numpy()
-                confs = result.boxes.conf.cpu().numpy()
-                best_idx = confs.argmax()
-
-                # get the target plane's coords and the confidence
-                x1, y1, x2, y2 = boxes_xyxy[best_idx]
-                score = float(confs[best_idx])
-
-                # draw the bounding box and confidence string
-                obj_cx, obj_cy, dx_norm, dy_norm = mathHelpers.compute_center_deviation(x1, y1, x2, y2, w, h)
-
-                hedef_x = int(obj_cx)
-                hedef_y = int(obj_cy)
-                hedef_w = int(x2 - x1)
-                hedef_h = int(y2 - y1)
-
-                smoothed_dx = (filter_alpha * dx_norm) + ((1.0 - filter_alpha) * smoothed_dx)
-                smoothed_dy = (filter_alpha * dy_norm) + ((1.0 - filter_alpha) * smoothed_dy)
-
-                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                cv2.circle(frame, (int(obj_cx), int(obj_cy)), 5, (0, 0, 255), -1)
-                cv2.line(frame, (w // 2, h // 2), (int(obj_cx), int(obj_cy)), (255, 0, 0), 2)
-
-                text1 = f"conf={score:.2f}"
-                cv2.putText(frame, text1, (int(x1), max(20, int(y1) - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-                # Kilitlenme Süreci Kontrolü (Hedef merkez kutusunda mı?)
-                if abs(dx_norm) < LOCK_BBOX_THRESHOLD and abs(dy_norm) < LOCK_BBOX_THRESHOLD:
-                    if not is_locked_on:
-                        is_locked_on = True
-                        lock_start_time = now
-                        print("[LOCK] Kilitlenme BAŞLADI!")
-                    else:
-                        current_lock_dur = now - lock_start_time
-                        cv2.putText(frame, f"LOCKING: {current_lock_dur:.1f}s", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-                else:
-                    if is_locked_on:
-                        lock_duration = now - lock_start_time
-                        is_locked_on = False
-                        print(f"[LOCK] Hedef merkezden çıktı. Kilitlenme koptu. Süre: {lock_duration:.1f}s")
-                        if lock_duration >= LOCK_REQUIRED_TIME:
-                            print(f"[LOCK] {LOCK_REQUIRED_TIME} saniyeyi aştığı için BAŞARILI kilitlenme sayıldı! API'ye gönderiliyor...")
-                            try:
-                                telemetry.send_lock(session, BASE_URL, token, AUTONOMOUS_FLIGHT_STATUS, telemetry.now_clock())
-                            except Exception as e:
-                                print("[LOCK] API Hatası:", e)
-
-                # Convert visual offsets to real-world heading and pitch targets
-                angle_offset = smoothed_dx * (FOV_X_DEG / 2.0)
-                desired_yaw_from_vision = mathHelpers.wrap_angle_deg(current_yaw + angle_offset)
-                
-                pitch_offset = -smoothed_dy * (FOV_Y_DEG / 2.0)
-                desired_pitch_from_vision = current_pitch + pitch_offset
-                
-                last_vision_yaw = desired_yaw_from_vision
-                last_vision_pitch = desired_pitch_from_vision
-
-                cmd.update('yaw', desired_yaw_from_vision)
-                cmd.update('pitch', desired_pitch_from_vision)
-                cmd.update('roll', None)
-                cmd.update('alt', None)
-
-                # Distance approximation heuristic for speed control
-                # We use GPS distance to maintain a solid follow distance and keep the target in frame
-                FOLLOW_DISTANCE = 25.0  # safe distance in meters
-                if current_lat is not None and target_lat is not None:
-                    dist = mathHelpers.get_distance(current_lat, current_lon, target_lat, target_lon)
-                    dist_error = dist - FOLLOW_DISTANCE
-                    speed_correction = dist_error * 0.8
-                    desired_speed = mathHelpers.clamp(20.0 + speed_correction, AXIS_BOUNDS['speed'][0], AXIS_BOUNDS['speed'][1])
-                    cmd.update('speed', desired_speed)
-
-                else:
-                    box_area = (x2 - x1) * (y2 - y1)
-                    frame_area = w * h
-                    area_ratio = box_area / frame_area
-
-                    target_area_ratio = 0.02  # Assuming target occupies ~2% of the frame when at ideal following distance
-                    area_error = target_area_ratio - area_ratio
-                    speed_correction = area_error * 100.0
-
-                    desired_speed = mathHelpers.clamp(20.0 + speed_correction, AXIS_BOUNDS['speed'][0], AXIS_BOUNDS['speed'][1])
-                    cmd.update('speed', desired_speed)
-
+        elif CURRENT_MISSION_MODE == "enemy":
+            cmd_pitch = None
+            speed_info = speed_from_distance(current_lat, current_lon, target.lat, target.lon)
+            cmd_speed = speed_info[0] if speed_info is not None else FOLLOW_BASE_SPEED
+            if current_lat is not None and current_lon is not None and target.has_reacquire_data():
+                behind_bearing = (target.yaw + 180.0) % 360.0
+                behind_lat, behind_lon = mathHelpers.destination_point(target.lat, target.lon, behind_bearing, FOLLOW_DISTANCE_M)
+                cmd_yaw = mathHelpers.get_bearing(current_lat, current_lon, behind_lat, behind_lon)
+                cmd_alt = target.alt
+                yaw_source = 'TRAIL'
             else:
-                if is_locked_on:
-                    lock_duration = now - lock_start_time
-                    is_locked_on = False
-                    print(f"[LOCK] Hedef kaybedildi. Kilitlenme koptu. Süre: {lock_duration:.1f}s")
-                    if lock_duration >= LOCK_REQUIRED_TIME:
-                        print(f"[LOCK] {LOCK_REQUIRED_TIME} saniyeyi aştığı için BAŞARILI kilitlenme sayıldı! API'ye gönderiliyor...")
-                        try:
-                            telemetry.send_lock(session, BASE_URL, token, AUTONOMOUS_FLIGHT_STATUS, telemetry.now_clock())
-                        except Exception as e:
-                            print("[LOCK] API Hatası:", e)
+                cmd_alt = TAKEOFF_ALT_TARGET
+                yaw_source = 'LEVEL'
 
-                # Acknowledgement and memory system
-                if last_vision_yaw is not None and last_vision_pitch is not None:
-                    yaw_reached = abs(mathHelpers.wrap_angle_deg(current_yaw - last_vision_yaw)) <= 5.0
-                    pitch_reached = abs(current_pitch - last_vision_pitch) <= 5.0
-                    
-                    if yaw_reached and pitch_reached:
-                        last_vision_yaw = None
-                        last_vision_pitch = None
-                    else:
-                        cmd.update('yaw', last_vision_yaw)
-                        cmd.update('pitch', last_vision_pitch)
-                        cmd.update('roll', None)
-                        cmd.update('alt', None)
-                        cmd.update('speed', 20.0)
-                        
-                if last_vision_yaw is None: # We either never saw it, or we reached the target and lost it
-                    cmd.update('roll', None)
-                    cmd.update('pitch', None)
-                    cmd.update('speed', 20.0)
+            if lock_start_time is not None and (now - lock_last_valid_time) > LOCK_TOLERANCE_SECONDS:
+                print(f"[LOCK] Görüntü yok, kilit koptu. Süre: {lock_elapsed:.1f}s")
+                lock_start_time = None
+                lock_last_valid_time = 0.0
+                lock_sent = False
 
-                    if current_lat is not None and target_lat is not None:
-                        desired_yaw = mathHelpers.get_bearing(current_lat, current_lon, target_lat, target_lon)
-                        cmd.update('yaw', desired_yaw)
-                        cmd.update('alt', target_alt)
-                    else:
-                        if cmd.snapshot()[2] is None:
-                            cmd.update('yaw', current_yaw)
-                        cmd.update('alt', TAKEOFF_ALT_TARGET)
+        elif CURRENT_MISSION_MODE == "normal":
+            cmd_pitch = None
+            cmd_yaw = current_yaw
+            cmd_alt = TAKEOFF_ALT_TARGET
+            cmd_speed = FOLLOW_BASE_SPEED
+            yaw_source = 'LEVEL'
 
-            cv2.imshow("YOLOv8 Pose UDP Inference", frame)
+        elif CURRENT_MISSION_MODE == "qr":
+            cmd_speed = FOLLOW_BASE_SPEED
+            if qr_enlem is not None and qr_boylam is not None and current_lat is not None and current_lon is not None:
+                cmd_yaw = mathHelpers.get_bearing(current_lat, current_lon, qr_enlem, qr_boylam)
+                if qr_mission_state == "DIVE":
+                    cmd_pitch = -35.0
+                    cmd_alt = None
+                else:
+                    cmd_pitch = None
+                    cmd_alt = 110.0
+            else:
+                cmd_pitch = None
+                cmd_yaw = current_yaw
+                cmd_alt = TAKEOFF_ALT_TARGET
+            yaw_source = 'QR'
 
-        # Move the minimap and waitKey OUTSIDE the 'if ret:' block!
-        if closest_enemy is not None:
-            map_img = draw_minimap(current_lat, current_lon, current_yaw, hss_list, FLIGHT_BOUNDARIES, closest_enemy['iha_enlem'], closest_enemy['iha_boylam'], qr_enlem, qr_boylam)
-        else:
-            map_img = draw_minimap(current_lat, current_lon, current_yaw, hss_list, FLIGHT_BOUNDARIES, None, None, qr_enlem, qr_boylam)
-        
+        target_lat = target.lat if target.has_position() else None
+        target_lon = target.lon if target.has_position() else None
+        map_img = draw_minimap(current_lat, current_lon, current_yaw, hss_list, FLIGHT_BOUNDARIES, target_lat, target_lon, qr_enlem, qr_boylam)
         cv2.imshow("Minimap", map_img)
         cv2.waitKey(1)
-        ## END OF AI RELATED STUFF ##
 
-        # sending the telemetry data to the server in a background thread
         if now - last_telemetry_time >= 0.5:
             if current_lat is not None and current_lon is not None:
-                kilitlenme = 1 if (last_vision_yaw is not None) else 0
-                
-                # Pack the arguments
                 telemetry_args = {
                     'session': session, 'base_url': BASE_URL, 'token': token, 'team_no': TEAM_NO,
                     'lat': current_lat, 'lon': current_lon, 'alt': current_alt,
                     'pitch': current_pitch, 'yaw': current_yaw % 360, 'roll': current_roll,
                     'spd': current_spd, 'battery': battery, 'otonom': AUTONOMOUS_FLIGHT_STATUS,
-                    'gps_time': gps_time, 'kilit': kilitlenme,
+                    'gps_time': gps_time, 'kilit': 1 if lock_start_time is not None else 0,
                     'hx': hedef_x, 'hy': hedef_y, 'hw': hedef_w, 'hh': hedef_h
                 }
-                
-                # Fire and forget! Loop continues immediately.
                 threading.Thread(target=async_send_telemetry, args=(telemetry_args,), daemon=True).start()
-                
             last_telemetry_time = now
 
+        t_pitch, t_yaw, t_alt, t_speed = cmd_pitch, cmd_yaw, cmd_alt, cmd_speed
 
-        t_pitch, t_roll, t_yaw, t_alt, t_speed, running = cmd.snapshot()
-        if not running: break
+        if current_lat is not None and current_lon is not None and t_yaw is not None:
+            safe_yaw = t_yaw
+            if hss_list:
+                safe_yaw = mathHelpers.compute_apf_hss(
+                    current_lat, current_lon, current_yaw, current_spd, safe_yaw, hss_list
+                )
+            if FLIGHT_BOUNDARIES:
+                safe_yaw = mathHelpers.enforce_flight_boundaries(
+                    current_lat, current_lon, current_yaw, current_spd, safe_yaw, FLIGHT_BOUNDARIES
+                )
+            if abs(mathHelpers.wrap_angle_deg(safe_yaw - t_yaw)) > 1.0:
+                t_yaw = safe_yaw
+                yaw_source = 'SAFE'
 
-        ## QR MISSION
-        if CURRENT_MISSION_MODE == "qr":
-            if qr_enlem is not None and qr_boylam is not None and current_lat is not None and current_lon is not None:
-                dist_to_qr = mathHelpers.get_distance(current_lat, current_lon, qr_enlem, qr_boylam)
-                
-                if qr_mission_state == "APPROACH":
-                    target_lat = qr_enlem
-                    target_lon = qr_boylam
-                    target_alt = 110.0
-                    if dist_to_qr < 170.0 and current_alt > 100.0:
-                        kamikaze_start_time = telemetry.now_clock()
-                        qr_mission_state = "DIVE"
-                        print("[QR MISSION] Close to QR! Initiating DIVE!")
-                
-                elif qr_mission_state == "DIVE":
-                    # Start with default dive pitch, but allow vision to override it
-                    t_pitch = -35.0
-                    t_alt = None
-                    qr_vision_yaw = None
-                    qr_data, bbox = None, None
-                    
-                    if ret:
-                        try:
-                            qr_data, bbox, _ = qr_detector.detectAndDecode(frame)
-                        except cv2.error:
-                            pass
-                            
-                        if bbox is not None:
-                            pts = bbox[0]
-                            # Calculate the center of the QR Code
-                            qr_cx = sum(p[0] for p in pts) / 4.0
-                            qr_cy = sum(p[1] for p in pts) / 4.0
-                            
-                            # --- YAW (X-Axis) CORRECTION ---
-                            dx_norm = (qr_cx - w/2) / (w/2)
-                            angle_offset = dx_norm * (FOV_X_DEG / 2.0)
-                            qr_vision_yaw = mathHelpers.wrap_angle_deg(current_yaw + angle_offset)
-                            
-                            # --- PITCH (Y-Axis) CORRECTION ---
-                            # Calculate how far off-center the QR is vertically
-                            dy_norm = (qr_cy - h/2) / (h/2)
-                            pitch_offset = -dy_norm * (FOV_Y_DEG / 2.0)
-                            
-                            # Update target pitch based on vision, clamped to safe dive angles
-                            vision_pitch = current_pitch + pitch_offset
-                            t_pitch = mathHelpers.clamp(vision_pitch, -45.0, -15.0)
-                                
-                            # Draw box and center-point for visual feedback
-                            pts = np.int32(pts).reshape(-1, 1, 2)
-                            cv2.polylines(frame, [pts], True, (255, 0, 255), 2)
-                            cv2.circle(frame, (int(qr_cx), int(qr_cy)), 5, (0, 255, 255), -1)
-
-                    if qr_data:
-                        print(f"[QR MISSION] QR detected: {qr_data}")
-                        try:
-                            if qr_resp and not sended_qr:
-                                kamikaze_zaman = telemetry.now_clock()
-                                telemetry.send_kamikaze(session, BASE_URL, token, TEAM_NO, qr_data, kamikaze_start_time, kamikaze_zaman)
-                                sended_qr = True
-                                print("[QR MISSION] QR read successfully! Returning to normal flight.")
-                                qr_mission_state = "PULLOUT"
-                        except Exception as e:
-                            print(f"[QR] QR could not be sent: {e}")
-                            
-                    if qr_vision_yaw is not None:
-                        t_yaw = qr_vision_yaw
-                    
-                    if current_alt < 45.0:
-                        qr_mission_state = "PULLOUT"
-                        CURRENT_MISSION_MODE = "normal"
-                        print("[QR MISSION] Alt < 45m! Aborting dive, pulling out!")
-                        
-                elif qr_mission_state == "PULLOUT":
-                    target_lat = qr_enlem
-                    target_lon = qr_boylam
-                    target_alt = TAKEOFF_ALT_TARGET
-                    print("[QR MISSION] Returning to normal flight.")
-                    qr_mission_state = "APPROACH"
-                    CURRENT_MISSION_MODE = "normal"
-            else:
-                target_lat = None
-                target_lon = None
-
-        if CURRENT_MISSION_MODE == "normal":
-            target_lat = None
-            target_lon = None
-
-        ## locating the enemy
-        elif closest_enemy is not None and CURRENT_MISSION_MODE == "enemy":
-            target_lat = closest_enemy["iha_enlem"]
-            target_lon = closest_enemy["iha_boylam"]
-            target_alt = closest_enemy["iha_irtifa"]
-
-        # alt rate calc
         if prev_meas['alt'] is None:
             prev_meas['alt'] = current_alt
         dA = current_alt - prev_meas['alt']
@@ -830,7 +1302,6 @@ def main_loop():
         prev_meas['alt_rate_smoothed'] = a_rate
         prev_meas['alt'] = current_alt
 
-        # speed rate calc
         if prev_meas['speed'] is None:
             prev_meas['speed'] = current_spd
         spd_delta = current_spd - prev_meas['speed']
@@ -839,85 +1310,104 @@ def main_loop():
         prev_meas['spd_rate_smoothed'] = err_rate
         prev_meas['speed'] = current_spd
 
-        # pitch calc dependent on alt
+        desired_pitch = 0.0
         if t_alt is not None:
-            low, high = AXIS_BOUNDS['pitch']
-            desired_pitch = mathHelpers.clamp(ctrls['altitude'].compute(t_alt - current_alt, a_rate, dt), low, high)
-
-        # normal pitch calc
+            alt_error = t_alt - current_alt
+            if abs(alt_error) <= ALTITUDE_DEADBAND_M:
+                ctrls['altitude'].reset()
+            else:
+                desired_pitch = mathHelpers.clamp(
+                    ctrls['altitude'].compute(alt_error, a_rate, dt),
+                    -GPS_REACQUIRE_PITCH_LIMIT_DEG,
+                    GPS_REACQUIRE_PITCH_LIMIT_DEG,
+                )
+                pitch_source = 'ALT'
         elif t_pitch is not None:
             low, high = AXIS_BOUNDS['pitch']
             desired_pitch = mathHelpers.clamp(t_pitch, low, high)
-        else:
-            desired_pitch = 0.0
-
-        if current_lat is not None and current_lon is not None:
-            safe_yaw = current_yaw
-            if hss_list:
-                safe_yaw = mathHelpers.compute_apf_hss(
-                    current_lat, current_lon, safe_yaw, current_spd, safe_yaw, hss_list
-                )
-            if FLIGHT_BOUNDARIES:
-                safe_yaw = mathHelpers.enforce_flight_boundaries(
-                    current_lat, current_lon, safe_yaw, current_spd, safe_yaw, FLIGHT_BOUNDARIES
-                )
-            if safe_yaw != current_yaw:
-                print("OBSTACLE / BOUNDARY AHEAD")
-                cmd.update('yaw', safe_yaw)
-                cmd.update('roll', None)  # Override direct roll commands to steer away
-                t_yaw = safe_yaw
-                t_roll = None
-
-        # roll calc dependent on yaw
-        if t_yaw is not None:
-            low, high = AXIS_BOUNDS['roll']
-            heading_error = mathHelpers.wrap_angle_deg(t_yaw - current_yaw)
-            desired_roll = mathHelpers.clamp(ctrls['heading'].compute(heading_error, -current_yaw_rate, dt), low, high)
-
-        # normal roll calc
-        elif t_roll is not None:
-            low, high = AXIS_BOUNDS['roll']
-            desired_roll = mathHelpers.clamp(t_roll, low, high)
-        else:
-            desired_roll = 0.0
-
-        # put the desired vals at hybrid controller
-        pitch_error = desired_pitch - current_pitch
-        roll_error = desired_roll - current_roll
-        pitch_correction = ctrls['pitch_att'].compute(pitch_error, -current_pitch_rate, dt)
-        roll_correction = ctrls['roll_att'].compute(roll_error, -current_roll_rate, dt)
+            pitch_source = 'VIS'
 
         low, high = AXIS_BOUNDS['pitch']
-        target_pitch = mathHelpers.clamp(desired_pitch + pitch_correction, low, high)
-
-        low, high = AXIS_BOUNDS['roll']
-        target_roll = mathHelpers.clamp(desired_roll + roll_correction, low, high)
-
-        # speed control / desired thrust calc
-        if t_speed is not None:
-            desired_thrust = mathHelpers.clamp(
-                trim_thrust + ctrls['speed'].compute(t_speed - current_spd, err_rate, dt), 0.2, 1.0)
-        else:
-            desired_thrust = trim_thrust
-
-        # updated thrust calculations with speed control
-        thrust_step_limit = 0.8 * dt
-        current_thrust += mathHelpers.clamp(desired_thrust - current_thrust, -thrust_step_limit, thrust_step_limit)
-        current_thrust = mathHelpers.clamp(current_thrust, 0.2, 1.0)
-
-        # send the dnew vals to the plane
-        connection.mav.rc_channels_override_send(
-            connection.target_system, connection.target_component,
-            mathHelpers.angle_to_pwm(target_roll, AXIS_BOUNDS['roll'][1]),  # Roll
-            mathHelpers.angle_to_pwm(target_pitch, AXIS_BOUNDS['pitch'][1]),  # Pitch
-            mathHelpers.throttle_to_pwm(current_thrust),  # Throttle
-            1500,  # Yaw
-            0, 0, 0, 0
+        pitch_rate_limit = VISION_PITCH_CMD_RATE_DPS if t_pitch is not None else GPS_PITCH_CMD_RATE_DPS
+        target_pitch_cmd = mathHelpers.clamp(
+            rate_limit_value(target_pitch_cmd, desired_pitch, pitch_rate_limit, dt),
+            low,
+            high,
         )
+
+        if t_speed is not None:
+            low, high = AXIS_BOUNDS['speed']
+            if t_speed < target_speed_cmd:
+                target_speed_cmd = mathHelpers.clamp(t_speed, low, high)
+            else:
+                target_speed_cmd = mathHelpers.clamp(
+                    ctrls['speed'].smooth_value(target_speed_cmd, t_speed, dt),
+                    low,
+                    high,
+                )
+
+        speed_error = target_speed_cmd - current_spd
+        desired_throttle = mathHelpers.clamp(
+            GUIDED_TRIM_THROTTLE + ctrls['speed'].compute(speed_error, err_rate, dt),
+            GUIDED_MIN_THROTTLE,
+            GUIDED_MAX_THROTTLE,
+        )
+        throttle_step_limit = GUIDED_THROTTLE_RATE * dt
+        target_throttle_cmd += mathHelpers.clamp(
+            desired_throttle - target_throttle_cmd,
+            -throttle_step_limit,
+            throttle_step_limit,
+        )
+        target_throttle_cmd = mathHelpers.clamp(target_throttle_cmd, GUIDED_MIN_THROTTLE, GUIDED_MAX_THROTTLE)
+
+        target_yaw_cmd = t_yaw % 360.0 if t_yaw is not None else None
+        if now - last_status_time >= STATUS_INTERVAL:
+            speed_info = speed_from_distance(current_lat, current_lon, target.lat, target.lon)
+            dist_text = f"{speed_info[1]:.1f}m" if speed_info is not None else "n/a"
+            target_speed_text = f"{target.speed:.1f}" if target.speed is not None else "n/a"
+            target_pitch_text = f"{target.pitch:.1f}" if target.pitch is not None else "n/a"
+            debug_parts = [
+                f"Mission={CURRENT_MISSION_MODE}",
+                f"Vision={visual_source}",
+                f"YawSrc={yaw_source}",
+                f"TgtYaw={t_yaw}",
+                f"CurYaw={current_yaw:.1f}",
+                f"CmdYaw={target_yaw_cmd if target_yaw_cmd is not None else 'n/a'}",
+                f"TgtPitch={t_pitch}",
+                f"TgtPlanePitch={target_pitch_text}",
+                f"CurPitch={current_pitch:.1f}",
+                f"DesPitch={desired_pitch:.1f}",
+                f"CmdPitch={target_pitch_cmd:.1f}",
+                f"PitchSrc={pitch_source}",
+                f"CmdSpd={t_speed}",
+                f"OwnSpd={current_spd:.1f}",
+                f"TgtSpd={target_speed_text}",
+                f"Thr={target_throttle_cmd:.2f}",
+                f"Dist={dist_text}",
+                f"Follow={vision_follow_distance:.1f}m",
+                f"Conf={visual_score:.2f}",
+                f"BoxW={box_w_ratio * 100.0:.1f}%",
+                f"BoxH={box_h_ratio * 100.0:.1f}%",
+                f"LockIn={int(lock_center_inside)}",
+                f"BoxOK={int(lock_size_ok)}",
+                f"LockT={lock_elapsed:.1f}",
+                f"LockOK={int(lock_ready)}",
+                f"YOLO={yolo_hits}/{frame_count}",
+                f"TRACK={tracker_hits}",
+            ]
+            print(" ".join(debug_parts))
+            last_status_time = now
+
+        if t_yaw is not None:
+            send_guided_heading(target_yaw_cmd)
+        send_guided_attitude(current_roll, target_pitch_cmd, current_yaw, throttle=target_throttle_cmd)
+        send_guided_speed(target_speed_cmd)
+        time.sleep(0.05)
 
 
 if __name__ == '__main__':
     token = telemetry.login(session, BASE_URL, USERNAME, PASSWORD)
+    configure_speed_limits()
     wait_for_prearm()
     auto_and_arm()
     main_loop()

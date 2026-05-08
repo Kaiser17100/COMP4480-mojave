@@ -21,6 +21,10 @@ class PIDController:
         self._integral = 0.0
         self._filtered_rate = 0.0
 
+    def reset(self):
+        self._integral = 0.0
+        self._filtered_rate = 0.0
+
     def compute(
         self,
         error: float,
@@ -156,3 +160,18 @@ class HybridController:
     def compute(self, error: float, rate: float, dt: float) -> float:
         gain_scales = self.fuzzy.compute_scales(error, rate)
         return self.pid.compute(error, rate, dt, **gain_scales)
+
+    def smooth_value(self, current_value: float, desired_value: float, dt: float, rate: float = 0.0) -> float:
+        error = desired_value - current_value
+        if abs(error) <= 1e-6:
+            return desired_value
+
+        commanded_rate = self.compute(error, rate, dt)
+        raw_step = commanded_rate * max(dt, 0.01)
+
+        if error > 0.0:
+            step = clamp(raw_step, 0.0, error)
+        else:
+            step = clamp(raw_step, error, 0.0)
+
+        return current_value + step
