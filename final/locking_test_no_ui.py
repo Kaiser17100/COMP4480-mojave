@@ -14,8 +14,6 @@ import numpy as np
 import requests
 import threading
 import socket
-import sys
-import queue
 from urllib.parse import urlparse
 
 VALID_MISSION_MODES = {"enemy", "qr", "normal"}
@@ -339,163 +337,6 @@ def input_thread_func():
                 print(f"[MISSION] Invalid mode '{val}'. Use 'enemy', 'qr' or 'normal'.")
         except:
             break
-
-
-# =========================
-# GUI: 3 Mission Button + Mission/Telemetry Log Panes
-# =========================
-USE_GUI = os.getenv("IHA_USE_GUI", "1").strip().lower() not in ("0", "false", "no", "off")
-
-TELEMETRY_LOG_KEYWORDS = ("TELEMETRY STATUS", "LOCK STATUS", "KAMIKAZE STATUS", "LOGIN STATUS", "LOGIN RESP", "SEND QR")
-
-
-class LogRouter:
-    """Replace sys.stdout. Routes lines to either the mission queue or the
-    telemetry queue based on keyword. Always echoes to original stdout too."""
-
-    def __init__(self, original):
-        self.original = original
-        self.mission_q = queue.Queue()
-        self.telemetry_q = queue.Queue()
-        self._buffer = ""
-        self._lock = threading.Lock()
-
-    def write(self, text):
-        try:
-            self.original.write(text)
-            self.original.flush()
-        except Exception:
-            pass
-        with self._lock:
-            self._buffer += text
-            while '\n' in self._buffer:
-                line, self._buffer = self._buffer.split('\n', 1)
-                self._route(line)
-
-    def _route(self, line):
-        if not line.strip():
-            return
-        if any(k in line for k in TELEMETRY_LOG_KEYWORDS):
-            self.telemetry_q.put(line)
-        else:
-            self.mission_q.put(line)
-
-    def flush(self):
-        try:
-            self.original.flush()
-        except Exception:
-            pass
-
-
-class MissionUI:
-    """Tkinter window: 3 buttons + 2 log panes. Runs on the main thread."""
-
-    def __init__(self, router):
-        import tkinter as tk
-        from tkinter import scrolledtext
-
-        self._tk = tk
-        self.router = router
-        self.root = tk.Tk()
-        self.root.title("IHA Mission Control")
-        self.root.geometry("1100x650")
-        self.root.configure(bg="#1e1e1e")
-
-        # --- Top bar: buttons + status ---
-        top = tk.Frame(self.root, bg="#1e1e1e")
-        top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
-
-        btn_specs = [
-            ("QR", "qr", "#2e7d32"),
-            ("ENEMY", "enemy", "#c62828"),
-            ("NORMAL", "normal", "#1565c0"),
-        ]
-        for label, mode, color in btn_specs:
-            b = tk.Button(
-                top, text=label, command=lambda m=mode: self.set_mode(m),
-                bg=color, fg="white", activebackground=color,
-                font=("Arial", 14, "bold"), width=10, height=2,
-                relief=tk.FLAT, bd=0, padx=8, pady=4,
-            )
-            b.pack(side=tk.LEFT, padx=6)
-
-        self.mode_label = tk.Label(
-            top, text=f"Mode: {CURRENT_MISSION_MODE.upper()}",
-            font=("Arial", 14, "bold"), fg="#ffd54f", bg="#1e1e1e",
-        )
-        self.mode_label.pack(side=tk.LEFT, padx=24)
-
-        # --- Two text panes side by side ---
-        body = tk.Frame(self.root, bg="#1e1e1e")
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=4)
-
-        left = tk.LabelFrame(body, text="Mission / Attitude", fg="#fff", bg="#1e1e1e",
-                              font=("Arial", 10, "bold"))
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
-        self.mission_text = scrolledtext.ScrolledText(
-            left, bg="#0d1117", fg="#c9f5c0", insertbackground="#fff",
-            font=("Courier", 9), wrap=tk.NONE, state=tk.DISABLED,
-        )
-        self.mission_text.pack(fill=tk.BOTH, expand=True)
-
-        right = tk.LabelFrame(body, text="Server Telemetry", fg="#fff", bg="#1e1e1e",
-                               font=("Arial", 10, "bold"))
-        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=4)
-        self.telemetry_text = scrolledtext.ScrolledText(
-            right, bg="#0d1117", fg="#ffcb8b", insertbackground="#fff",
-            font=("Courier", 9), wrap=tk.NONE, state=tk.DISABLED,
-        )
-        self.telemetry_text.pack(fill=tk.BOTH, expand=True)
-
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.root.after(100, self._poll_queues)
-
-    def set_mode(self, mode):
-        global CURRENT_MISSION_MODE
-        if mode not in VALID_MISSION_MODES:
-            return
-        CURRENT_MISSION_MODE = mode
-        self.mode_label.config(text=f"Mode: {mode.upper()}")
-        print(f"[MISSION] Mode switched to: {mode} (UI button)")
-
-    def _append(self, widget, line):
-        widget.configure(state=self._tk.NORMAL)
-        widget.insert(self._tk.END, line + "\n")
-        widget.see(self._tk.END)
-        line_count = int(widget.index("end-1c").split(".")[0])
-        if line_count > 1500:
-            widget.delete("1.0", f"{line_count - 1500}.0")
-        widget.configure(state=self._tk.DISABLED)
-
-    def _drain(self, q, widget):
-        drained = 0
-        while drained < 200:
-            try:
-                line = q.get_nowait()
-            except queue.Empty:
-                break
-            self._append(widget, line)
-            drained += 1
-
-    def _poll_queues(self):
-        self._drain(self.router.mission_q, self.mission_text)
-        self._drain(self.router.telemetry_q, self.telemetry_text)
-        try:
-            if CURRENT_MISSION_MODE.upper() not in self.mode_label.cget("text"):
-                self.mode_label.config(text=f"Mode: {CURRENT_MISSION_MODE.upper()}")
-        except Exception:
-            pass
-        self.root.after(100, self._poll_queues)
-
-    def _on_close(self):
-        try:
-            self.root.destroy()
-        except Exception:
-            pass
-        os._exit(0)
-
-    def run(self):
-        self.root.mainloop()
 
 
 def wait_for_prearm():
@@ -1083,9 +924,8 @@ def async_send_lock(lock_end_time):
 def main_loop():
     global CURRENT_MISSION_MODE
     global closest_enemy
-    if not USE_GUI:
-        input_thread = threading.Thread(target=input_thread_func, daemon=True)
-        input_thread.start()
+    input_thread = threading.Thread(target=input_thread_func, daemon=True)
+    input_thread.start()
 
     threading.Thread(target=telemetry_sender_thread, daemon=True).start()
 
@@ -1706,22 +1546,8 @@ def main_loop():
 
 
 if __name__ == '__main__':
-    if USE_GUI:
-        try:
-            _router = LogRouter(sys.stdout)
-            sys.stdout = _router
-            _ui = MissionUI(_router)
-        except Exception as e:
-            print(f"[GUI] Açılamadı, terminale geri dönülüyor: {e}")
-            USE_GUI = False
-
     token = telemetry.login(session, BASE_URL, USERNAME, PASSWORD)
     configure_speed_limits()
     wait_for_prearm()
     auto_and_arm()
-
-    if USE_GUI:
-        threading.Thread(target=main_loop, daemon=True).start()
-        _ui.run()
-    else:
-        main_loop()
+    main_loop()
