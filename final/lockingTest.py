@@ -577,8 +577,8 @@ UDP_OUT_PORT = int(os.getenv("IHA_VIDEO_PORT", str(STREAM_PORTS.get(TEAM_NO, 540
 # =========================
 # Görüntü boyutu
 # =========================
-WIDTH = 640
-HEIGHT = 480
+WIDTH = 1920
+HEIGHT = 1080
 JPEG_QUALITY = 50
 
 send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1511,7 +1511,13 @@ def main_loop():
 
             success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             if success:
-                send_sock.sendto(buffer.tobytes(), (UDP_OUT_IP, UDP_OUT_PORT))
+                try:
+                    send_sock.sendto(buffer.tobytes(), (UDP_OUT_IP, UDP_OUT_PORT))
+                except OSError as e:
+                    if e.errno == 90:
+                        print(f"[UDP HATA] Görüntü paketi çok büyük ({len(buffer.tobytes())} bytes > 65535). Lütfen WIDTH ve HEIGHT değerlerini düşürün veya JPEG_QUALITY'yi azaltın!")
+                    else:
+                        print(f"[UDP HATA] {e}")
 
         elif CURRENT_MISSION_MODE == "enemy":
             cmd_pitch = None
